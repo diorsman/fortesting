@@ -4,16 +4,10 @@ CFLAGS=-DCOMPRESS -D_GNU_SOURCE -g -O2 -Wall
 LDFLAGS=
 AR=ar
 OBJS=webmon.o defgraphs.o str.o chart.jar.o
-LIBS=-lz
+LIBS=-lwebmon -lz
 
 
-all: test
-
-test: test.o libwebmon.a
-	${CC} ${LDFLAGS} -o test test.o libwebmon.a ${LIBS}
-
-test.o: test.c webmon.h
-	${CC} ${CFLAGS} -c test.c
+all: libwebmon.a
 
 libwebmon.a: ${OBJS}
 	${AR} -r libwebmon.a ${OBJS}
@@ -29,6 +23,16 @@ str.o: str.c str.h
 
 chart.jar.o: chart.jar.c
 	${CC} ${CFLAGS} -c chart.jar.c
+
+install: libwebmon.a
+	cp webmon.h /usr/local/include
+	cp libwebmon.a /usr/local/lib
+
+test: test.o
+	${CC} ${LDFLAGS} -o test test.o ${LIBS}
+
+test.o: test.c
+	${CC} ${CFLAGS} -c test.c
 
 clean: 
 	rm -f *.o test libwebmon.a

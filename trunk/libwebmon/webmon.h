@@ -24,6 +24,8 @@
 
 #define LINE_COUNT_MAX  6
 
+typedef const char **(*TEXTINFO_CB)(void *arg);
+typedef void (*FREE_TEXTINFO_CB)(void *arg);
 typedef int (*SAMPLE)(void *arg, double *ret);
 struct webmon_graph_t {
     /* for entire graph */
@@ -40,6 +42,8 @@ struct webmon_graph_t {
 int webmon_init(void);
 void *webmon_create(const char *title, const char *ip, int port, int nsample, 
                     int interval, int cpu, int mem, int netif);
+void webmon_set_textinfo_callback(void *webmon, TEXTINFO_CB cb, void *arg);
+void webmon_set_free_textinfo_callback(void *webmon, FREE_TEXTINFO_CB cb);
 int webmon_addgraph(void *webmon, const struct webmon_graph_t *graph);
 int webmon_run(void *webmon);
 
