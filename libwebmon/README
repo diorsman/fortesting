@@ -1,0 +1,13 @@
+            libwebmon: a web system/application monitor library.
+
+            Copyright (C) 2008 Du XiaoGang <dugang@188.com>
+
+To compile and test, type:
+    $ make
+    $ make install
+    $ make test
+
+The test program use port 80 by default, so you need launch test by root, 
+    # ./test
+
+Then, you can type "http://127.0.0.1" into your web browser to see the monitor page.

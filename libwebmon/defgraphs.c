@@ -350,18 +350,24 @@ struct webmon_graph_t def_graphs[] = {
 };
 
 /* add network device dynamically */
+struct netif_t {
+    char name[128];
+    long long last_trans;
+    struct timeval last_trans_sample_time;
+    long long last_recv;
+    struct timeval last_recv_sample_time;
+};
+
 static int
 netif_trans_sample(void *arg, double *ret)
 {
-    char *netif_name = (char *)arg, *p, *tok, *saveptr, linebuf[1024];
+    char *p, *tok, *saveptr, linebuf[1024];
     FILE *fp;
     int n = 0, interval;
     long long trans;
     struct timeval tv;
+    struct netif_t *ni = (struct netif_t *)arg;
     
-    static long long last_trans = -1;
-    static struct timeval last_sample_time;
-
     /* read stat information */
     fp = fopen("/proc/net/dev", "r");
     if (fp == NULL) {
@@ -371,7 +377,7 @@ netif_trans_sample(void *arg, double *ret)
     while (fgets(linebuf, sizeof(linebuf), fp) != NULL) {
         p = linebuf;
         p += strspn(p, " \t");
-        if (strncmp(p, netif_name, strlen(netif_name)) == 0) {
+        if (strncmp(p, ni->name, strlen(ni->name)) == 0) {
             n = 0;
             tok = strtok_r(linebuf, " \t:", &saveptr);
             while (tok != NULL) {
@@ -390,21 +396,21 @@ netif_trans_sample(void *arg, double *ret)
         return -1;
     }
     /* compute */
-    if (last_trans == -1) {
+    if (ni->last_trans == -1) {
         *ret = 0.0;
         /* for later sample */
-        last_trans = trans;
-        gettimeofday(&last_sample_time, NULL);
+        ni->last_trans = trans;
+        gettimeofday(&ni->last_trans_sample_time, NULL);
     } else {
         /* compute */
         gettimeofday(&tv, NULL);
-        interval = (tv.tv_sec - last_sample_time.tv_sec) * 1000 
-                   + (tv.tv_usec - last_sample_time.tv_usec) / 1000;
+        interval = (tv.tv_sec - ni->last_trans_sample_time.tv_sec) * 1000 
+                   + (tv.tv_usec - ni->last_trans_sample_time.tv_usec) / 1000;
         /* mbytes/s */
-        *ret = ((double)(trans - last_trans) * 1000) / interval / 1024 / 1024;
+        *ret = ((double)(trans - ni->last_trans) * 1000) / interval / 1024 / 1024;
         /* for later sample */
-        last_trans = trans;
-        last_sample_time = tv;
+        ni->last_trans = trans;
+        ni->last_trans_sample_time= tv;
     }
     /* ok */
     return 0;
@@ -413,15 +419,13 @@ netif_trans_sample(void *arg, double *ret)
 static int
 netif_recv_sample(void *arg, double *ret)
 {
-    char *netif_name = (char *)arg, *p, *tok, *saveptr, linebuf[1024];
+    char *p, *tok, *saveptr, linebuf[1024];
     FILE *fp;
     int n = 0, interval;
     long long recv;
     struct timeval tv;
+    struct netif_t *ni = (struct netif_t *)arg;
     
-    static long long last_recv = -1;
-    static struct timeval last_sample_time;
-
     /* read stat information */
     fp = fopen("/proc/net/dev", "r");
     if (fp == NULL) {
@@ -431,7 +435,7 @@ netif_recv_sample(void *arg, double *ret)
     while (fgets(linebuf, sizeof(linebuf), fp) != NULL) {
         p = linebuf;
         p += strspn(p, " \t");
-        if (strncmp(p, netif_name, strlen(netif_name)) == 0) {
+        if (strncmp(p, ni->name, strlen(ni->name)) == 0) {
             n = 0;
             tok = strtok_r(linebuf, " \t:", &saveptr);
             while (tok != NULL) {
@@ -450,21 +454,21 @@ netif_recv_sample(void *arg, double *ret)
         return -1;
     }
     /* compute */
-    if (last_recv == -1) {
+    if (ni->last_recv == -1) {
         *ret = 0.0;
         /* for later sample */
-        last_recv = recv;
-        gettimeofday(&last_sample_time, NULL);
+        ni->last_recv = recv;
+        gettimeofday(&ni->last_recv_sample_time, NULL);
     } else {
         /* compute */
         gettimeofday(&tv, NULL);
-        interval = (tv.tv_sec - last_sample_time.tv_sec) * 1000 
-                   + (tv.tv_usec - last_sample_time.tv_usec) / 1000;
+        interval = (tv.tv_sec - ni->last_recv_sample_time.tv_sec) * 1000 
+                   + (tv.tv_usec - ni->last_recv_sample_time.tv_usec) / 1000;
         /* mbytes/s */
-        *ret = ((double)(recv - last_recv) * 1000) / interval / 1024 / 1024;
+        *ret = ((double)(recv - ni->last_recv) * 1000) / interval / 1024 / 1024;
         /* for later sample */
-        last_recv = recv;
-        last_sample_time = tv;
+        ni->last_recv = recv;
+        ni->last_recv_sample_time= tv;
     }
     /* ok */
     return 0;
@@ -512,6 +516,7 @@ add_netif_graphs(void *s, const char *name_pattern)
     char *p, *q, linebuf[1024], netif_name[128];
     FILE *fp;
     int i;
+    struct netif_t *ni;
 
     static struct webmon_graph_t netif_graphs[NETIF_MAX];
     
@@ -554,10 +559,14 @@ add_netif_graphs(void *s, const char *name_pattern)
         netif_graphs[i].line_labels[1] = "Recv speed(MBytes/S)";
         netif_graphs[i].samples[0] = netif_trans_sample;
         netif_graphs[i].samples[1] = netif_recv_sample;
-        netif_graphs[i].args[0] = strdup(netif_name);
-        if (netif_graphs[i].args[0] == NULL)
+        ni = (struct netif_t *)malloc(sizeof(struct netif_t));
+        if (ni == NULL)
             goto err;
-        netif_graphs[i].args[1] = netif_graphs[i].args[0];
+        strcpy(ni->name, netif_name);
+        ni->last_trans = -1;
+        ni->last_recv = -1;
+        netif_graphs[i].args[0] = ni;
+        netif_graphs[i].args[1] = ni;
         /* add graph */
         if (webmon_addgraph(s, &netif_graphs[i]) == -1)
             goto err;
@@ -573,8 +582,8 @@ err:
     for (; i >= 0; i--) {
         if (netif_graphs[i].desc != NULL)
             free((void *)netif_graphs[i].desc);
-        if (netif_graphs[i].samples[0] != NULL)
-            free(netif_graphs[i].samples[0]);
+        if (netif_graphs[i].args[0] != NULL)
+            free(netif_graphs[i].args[0]);
     }
     return -1;
 }

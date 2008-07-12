@@ -77,6 +77,9 @@ struct webmon_t {
     int listen_fd;
     int nsample;
     int interval;
+    TEXTINFO_CB textinfo_cb;
+    void *textinfo_cb_arg;
+    FREE_TEXTINFO_CB free_textinfo_cb;
     int graph_count;
     const struct webmon_graph_t *graphs[GRAPH_MAX];
     /* dync data */
@@ -333,6 +336,21 @@ webmon_create(const char *title, const char *ip, int port, int nsample,
         }
     }
     return rets;
+}
+
+void
+webmon_set_textinfo_callback(void *webmon, TEXTINFO_CB cb, void *arg)
+{
+    struct webmon_t *s = (struct webmon_t *)webmon;
+    s->textinfo_cb = cb;
+    s->textinfo_cb_arg = arg;
+}
+
+void
+webmon_set_free_textinfo_callback(void *webmon, FREE_TEXTINFO_CB cb)
+{
+    struct webmon_t *s = (struct webmon_t *)webmon;
+    s->free_textinfo_cb = cb;
 }
 
 int 
@@ -675,6 +693,7 @@ make_statpage(struct webmon_t *s)
     struct entity_t *rets;
     struct string_t *out_str, *labels_str;
     char buf[4096], *comress_body;
+    const char **pp, **pp2;
     int ret, i, j, k, l, m;
     static char *statpage_begin =
         "<html>\r\n"
@@ -690,20 +709,29 @@ make_statpage(struct webmon_t *s)
         "                <hr>\r\n"
         "            </td></tr>\r\n"
         "            <tr><td align=\"right\">\r\n"
-        "                <b>This test last %d seconds</b>\r\n"
+        "                <b>For the last %d seconds</b>\r\n"
+        "                <hr>\r\n"
+        "            </td></tr>\r\n"
+        "            <tr><td align=\"left\">\r\n"
+        "                <b>User defined information:</b>\r\n"
         "                <hr>\r\n"
         "            </td></tr>\r\n"
         "\r\n";
-    static char *statpage_item_begin = 
+    static char *statpage_text_tpl = 
+        "            <tr><td align=\"left\">%s</td></tr>\r\n";
+    static char *statpage_graph_begin = 
+        "            <tr><td align=\"left\">\r\n"
+        "                <hr>\r\n"
+        "            </td></tr>\r\n"
         "            <tr><td align=\"center\">\r\n"
         "                <applet code=\"com.objectplanet.chart.ChartApplet.class\" codebase=\"/local/\" archive=\"chart.jar\" width=\"%d\" height=\"320\">\r\n"
         "                <param name=\"chart\" value=\"line\">\r\n"
         "                <param name=\"seriesCount\" value=\"%d\">\r\n"
         "                <param name=\"sampleValues_0\" value=\"";
-    static char *statpage_item_mid = 
+    static char *statpage_graph_mid = 
         "\">\r\n"
         "                <param name=\"sampleValues_%d\" value=\"";
-    static char *statpage_item_end = 
+    static char *statpage_graph_end = 
         "\">\r\n"
         "                <param name=\"sampleColors\" value=\"#FF0000,#00FF00,#0000FF,#FFFF00,#00FFFF,#FF00FF\">\r\n"
         "                <param name=\"range\" value=\"%0.2f\">\r\n"
@@ -721,7 +749,7 @@ make_statpage(struct webmon_t *s)
         "\r\n";
     static char *statpage_end =
         "            <tr><td align=\"right\">\r\n"
-        "                <b>This page is automatically created by %s-%s.</b>\r\n"
+        "                <b>This page is automatically created by <a href=\"http://code.google.com/p/fortesting/\">%s-%s<a>.</b>\r\n"
         "            </td></tr>\r\n"
         "        </table>\r\n"
         "    </body>\r\n"
@@ -738,16 +766,41 @@ make_statpage(struct webmon_t *s)
     }
 
     /* for page begin */
+    i = time(NULL) - s->stat_begin_time;
+    j = s->nsample * s->interval;
     ret = snprintf(buf, sizeof(buf), statpage_begin, s->title, s->title, 
-                   time(NULL) - s->stat_begin_time);
+                   i < j ? i : j);
     if (ret >= sizeof(buf))
         goto err;
     if (string_add(out_str, buf, ret) == -1)
         goto err;
+    /* for user defined information */
+    if (s->textinfo_cb != NULL) {
+        pp = s->textinfo_cb(s->textinfo_cb_arg);
+        /* backup pp */
+        pp2 = pp;
+        if (pp == NULL)
+            goto err;
+        while (*pp != NULL) {
+            /* text info */
+            ret = snprintf(buf, sizeof(buf), statpage_text_tpl, *pp);
+            if (ret >= sizeof(buf)) {
+                /* not error */
+                ret = sizeof(buf) - 1;
+            }
+            if (string_add(out_str, buf, ret) == -1)
+                goto err;
+            /* next */
+            pp++;
+        }
+        /* need free? */
+        if (s->free_textinfo_cb != NULL) 
+            s->free_textinfo_cb(pp2);
+    }
     /* for each graph */
     for (i = 0; i < s->graph_count; i++) {
-        /* statpage_item_begin */
-        ret = snprintf(buf, sizeof(buf), statpage_item_begin, 
+        /* statpage_graph_begin */
+        ret = snprintf(buf, sizeof(buf), statpage_graph_begin, 
                        s->nsample > GRAPH_WIDTH_DEF ? s->nsample : GRAPH_WIDTH_DEF, 
                        s->graphs[i]->line_count); 
         if (ret >= sizeof(buf))
@@ -772,8 +825,8 @@ make_statpage(struct webmon_t *s)
         /* have more than 1 line? */
         if (s->graphs[i]->line_count > 1) {
             for (k = 1; k < s->graphs[i]->line_count; k++) {
-                /* statpage_item_mid */
-                ret = snprintf(buf, sizeof(buf), statpage_item_mid, k);
+                /* statpage_graph_mid */
+                ret = snprintf(buf, sizeof(buf), statpage_graph_mid, k);
                 if (ret >= sizeof(buf))
                     goto err;
                 if (string_add(out_str, buf, ret) == -1)
@@ -790,7 +843,7 @@ make_statpage(struct webmon_t *s)
                 }
             }
         }
-        /* statpage_item_end */
+        /* statpage_graph_end */
         /* for labels */
         labels_str = string_create(0, 0);
         if (labels_str == NULL)
@@ -807,7 +860,7 @@ make_statpage(struct webmon_t *s)
                 goto err;
             }
         }
-        ret = snprintf(buf, sizeof(buf), statpage_item_end, 
+        ret = snprintf(buf, sizeof(buf), statpage_graph_end, 
                        s->graphs[i]->high_limit, 
                        s->graphs[i]->low_limit, 
                        string_get(labels_str),
