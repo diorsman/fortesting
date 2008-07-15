@@ -35,7 +35,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define SERV_ADDR           "192.168.7.46"
+#define SERV_ADDR           "192.168.8.56"
 #define SERV_PORT_BEGIN     8000
 #define SERV_PORT_RANGE     200
 #define SOCK_NUM_LIMIT      10000
@@ -435,13 +435,13 @@ lost_sample(void *arg, double *ret)
 
 struct webmon_graph_t my_graphs[] = {
     /* for packets transfer */
-    {"完成收发速率统计", 1, 40000, 0,
+    {"完成收发速率统计", 1, 50000, 0,
      {"round/s"},
      {completed_sample},
      {NULL},
     },
     /* for avg time */
-    {"平均完成时间统计", 1, 400, 0,
+    {"平均完成时间统计", 1, 100, 0,
      {"ms"},
      {avg_time_sample},
      {NULL},
@@ -578,7 +578,7 @@ main(int argc, char *argv[])
         ERR;
         exit(1);
     }
-    sd = webmon_create("updtest client", "0.0.0.0", 80, 900, 4, 1, 1, 1);
+    sd = webmon_create("updtest client", "0.0.0.0", 8888, 900, 4, 1, 1, 1);
     if (sd == NULL) {
         ERR;
         exit(1);
