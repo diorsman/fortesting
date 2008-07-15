@@ -42,7 +42,7 @@
 #define CONN_MAX        100
 #define REQ_MAX         4096
 #define URL_MAX         1024
-#define POLL_INTERVAL   200
+#define POLL_INTERVAL   600
 #define GRAPH_WIDTH_DEF 800
 #define COMPRESS_HDRLEN 1024
 #define CHUNK_HDRLEN_1  10
