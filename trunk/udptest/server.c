@@ -115,6 +115,7 @@ send_udp_packet(int sock_fd)
     /* get conn index */
     idx = sock_fd - sock_begin;
 
+#if 0
     /* send */
     ret = sendto(sock_fd, conn_arr[idx].buf, conn_arr[idx].data_len, 0, 
                  (struct sockaddr *)&conn_arr[idx].faddr, 
@@ -132,6 +133,25 @@ send_udp_packet(int sock_fd)
         send_count++;
         return 1;
     }
+#else
+    /* send */
+    ret = sendto(sock_fd, conn_arr[idx].buf, sizeof(unsigned long), 0, 
+                 (struct sockaddr *)&conn_arr[idx].faddr, 
+                 sizeof(conn_arr[idx].faddr));
+    if (ret == -1) {
+        if (errno == EAGAIN) {
+            return 0;
+        } else {
+            /* error */
+            ERR;
+            exit(1);
+        }
+    } else if (ret == sizeof(unsigned long)) {
+        conn_arr[idx].data_len = 0;
+        send_count++;
+        return 1;
+    }
+#endif
 
     /* never to here */
     ERR;

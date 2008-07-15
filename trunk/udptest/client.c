@@ -71,7 +71,9 @@ struct conn_item_t {
     unsigned long long send_time;
 };
 
-static char *serv_addr = SERV_ADDR;
+static char *serv_addr_def[] = {SERV_ADDR};
+static char **serv_addr = serv_addr_def;
+static int serv_addr_count = 1;
 static int serv_port_begin = SERV_PORT_BEGIN;
 static int serv_port_range = SERV_PORT_RANGE;
 static int sock_num = SOCK_NUM;
@@ -91,6 +93,66 @@ static unsigned long data_error = 0;
 static unsigned long lost_count = 0;
 static unsigned long reget_count = 0;
 static int wait_queue_len = 0;
+
+static char **
+parse_serv_addr(const char *arg, int *num)
+{
+    const char *p, *q;
+    int n, len;
+    char **rets, ip[20];
+
+    /* how many address will be used? */
+    p = arg;
+    n = 0;
+    while (1) {
+        n++;
+        q = strchr(p, ',');
+        /* for next */
+        if (q == NULL)
+            break;
+        p = q + 1;
+    }
+    *num = n;
+
+    rets = calloc(n + 1, sizeof(char *));
+    if (rets == NULL) 
+        return NULL;
+    /* for each ip */
+    p = arg;
+    n = 0;
+    while (1) {
+        /* get */
+        q = strchr(p, ',');
+        if (q != NULL) {
+            len = q - p;
+        } else {
+            len = strlen(p);
+        }
+        /* do simple check for ip */
+        if (len < 7/* 1.1.1.1 */|| len >= sizeof(ip))
+            goto err;
+        strncpy(ip, p, len);
+        ip[len] = '\0';
+        rets[n] = strdup(ip);
+        if (rets[n] == NULL)
+            goto err;
+        n++;
+        /* for next */
+        if (q == NULL)
+            break;
+        p = q + 1;
+    }
+
+    return rets;
+err:
+    n = 0;
+    while (rets[n] != NULL) {
+        free(rets[n]);
+        n++;
+    }
+    free(rets);
+    return NULL;
+}
 
 static int
 setlimits(int maxfd)
@@ -152,7 +214,7 @@ send_udp_packet(int sock_fd)
     struct timeval tv;
 
     /* init send buffer */
-    if (packet_data[sizeof(cur_seqno)] == 0)
+    if (packet_data[sizeof(unsigned long)] == 0)
         memset(packet_data, 0xaa, sizeof(packet_data));
 
     /* get conn index */
@@ -173,7 +235,8 @@ send_udp_packet(int sock_fd)
         /* set dest addr info */
         memset(&conn_arr[idx].daddr, 0, sizeof(conn_arr[idx].daddr));
         conn_arr[idx].daddr.sin_family = AF_INET;
-        conn_arr[idx].daddr.sin_addr.s_addr = inet_addr(serv_addr);
+        conn_arr[idx].daddr.sin_addr.s_addr = 
+            inet_addr(serv_addr[cur_seqno % serv_addr_count]);
         conn_arr[idx].daddr.sin_port = htons(serv_port_begin + 
             (cur_dest_port_offset++) % serv_port_range);
     } else if (conn_arr[idx].status == SENDING) {
@@ -246,6 +309,7 @@ recv_udp_packet(int sock_fd)
             }
         }
 
+#if 0
         /* check length */
         if (ret != packet_length) {
             /* ignore */
@@ -279,6 +343,31 @@ recv_udp_packet(int sock_fd)
                 goto data_error;
             }
         }
+#else
+        /* check length */
+        if (ret != sizeof(unsigned long)) {
+            /* ignore */
+            continue;
+        }
+        /* check from */
+        if (addr_len != sizeof(faddr) 
+            || faddr.sin_addr.s_addr != conn_arr[idx].daddr.sin_addr.s_addr
+            || faddr.sin_port != conn_arr[idx].daddr.sin_port)
+        {
+            /* reget */
+            reget_count++;
+            continue;
+        }
+        /* check received data */
+        /* check seqno */
+        if (memcmp((char *)(&conn_arr[idx].seqno), rbuf, 
+                   sizeof(unsigned long)) != 0) 
+        {
+            /* reget */
+            reget_count++;
+            continue;
+        }
+#endif
 
         /* recv all */
         gettimeofday(&tv, NULL);
@@ -490,7 +579,11 @@ main(int argc, char *argv[])
         }
         switch (ret) {
         case 'h':      /* SERV_ADDR */
-            serv_addr = strdup(optarg);
+            serv_addr = parse_serv_addr(optarg, &serv_addr_count);
+            if (serv_addr == NULL) {
+                show_help();
+                exit(1);
+            }
             break;
         case 'p':      /* SERV_PORT_BEGIN */
             serv_port_begin = atoi(optarg);
