@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
@@ -41,7 +42,7 @@
 #define SOCK_NUM_LIMIT      10000
 #define SOCK_NUM            200
 #define PACKET_MAX_LENGTH   2048
-#define PACKET_LENGTH       36 /* 64 - IP_HDR_LEN - UDP_HDR_LEN = 36*/
+#define PACKET_LENGTH       18 /* 46 - IP_HDR_LEN - UDP_HDR_LEN = 18 */
 #define MAX_LIFE_TIME       1000 /* ms */
 #define ERR \
         do { \
@@ -405,6 +406,57 @@ show_help(void)
 /**
  *  for webmon 
  */
+static time_t begin_time;
+
+static const char **
+textinfo_cb(void *arg)
+{
+    char **rets, strbuf[1024];
+
+    rets = calloc(3, sizeof(char *));
+    if (rets == NULL)
+        return NULL;
+
+    /* running time */
+    snprintf(strbuf, sizeof(strbuf), 
+             "I have been running for %u seconds.", 
+             (int)(time(NULL) - begin_time));
+    *rets = strdup(strbuf);
+    if (*rets == NULL)
+        goto err;
+    /* stats */
+    snprintf(strbuf, sizeof(strbuf), 
+             "Packets Statistics: sent/received(%lu), lost(%lu).", 
+             resp_count, lost_count);
+    *(rets + 1) = strdup(strbuf);
+    if (*(rets + 1) == NULL)
+        goto err;
+    /* end */
+    *(rets + 2) = NULL;
+
+    return (const char **)rets;
+
+err:
+    if (*rets != NULL)
+        free(*rets);
+    if (*(rets + 1) != NULL)
+        free(*(rets + 1));
+    free(rets);
+    return NULL;
+}
+
+static void
+free_textinfo_cb(void *arg)
+{
+    char **pp = arg;
+
+    while (*pp != NULL) {
+        free(*pp);
+        pp++;
+    }
+    free(arg);
+}
+
 static int
 completed_sample(void *arg, double *ret)
 {
@@ -464,6 +516,7 @@ wait_queue_length_sample(void *arg, double *ret)
     return 0;
 }
 
+#if 0
 static int
 data_error_sample(void *arg, double *ret)
 {
@@ -492,6 +545,7 @@ data_error_sample(void *arg, double *ret)
     /* ok */
     return 0;
 }
+#endif
 
 static int
 lost_sample(void *arg, double *ret)
@@ -524,34 +578,35 @@ lost_sample(void *arg, double *ret)
 
 struct webmon_graph_t my_graphs[] = {
     /* for packets transfer */
-    {"完成收发速率统计", 1, 50000, 0,
-     {"round/s"},
+    {"收发包速率", 1, 100000, 0,
+     {"packets/second"},
      {completed_sample},
      {NULL},
     },
     /* for avg time */
-    {"平均完成时间统计", 1, 100, 0,
+    {"平均收发包时间", 1, 100, 0,
      {"ms"},
      {avg_time_sample},
      {NULL},
     },
     /* for wait queue length */
-    {"等待队列长度统计", 1, 1000, 0,
+    {"等待队列长度", 1, 500, 0,
      {"n"},
      {wait_queue_length_sample},
      {NULL},
     },
     /* for error stat */
-    {"错误统计", 2, 100, 0,
-     {"data error/s", "lost/s"},
-     {data_error_sample, lost_sample},
-     {NULL, NULL},
+    {"丢包速率", 1, 100, 0,
+     {"packets/second"},
+     {lost_sample},
+     {NULL},
     },
 };
 
 static void *
 wrap_webmon_run(void *arg)
 {
+    begin_time = time(NULL);
     webmon_run(arg);
     return NULL;
 }
@@ -676,6 +731,9 @@ main(int argc, char *argv[])
         ERR;
         exit(1);
     }
+    /* set textinfo callback */
+    webmon_set_textinfo_callback(sd, textinfo_cb, NULL);
+    webmon_set_free_textinfo_callback(sd, free_textinfo_cb);
     /* add graphs */
     if (webmon_addgraph(sd, &my_graphs[0]) == -1) {
         ERR;
