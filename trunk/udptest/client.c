@@ -393,12 +393,12 @@ data_error:
 static void
 show_help(void)
 {
-    printf("usage: psclient [-h SERV_ADDR(%s)]\n"
-           "                [-p SERV_PORT_BEGIN(%d)]\n"
-           "                [-n SOCK_NUM(%d)]\n"
-           "                [-r SERV_PORT_RANGE(%d)]\n"
-           "                [-l PACKET_LENGTH(%d)]\n"
-           "                [-f MAX_LIFE_TIME(%d ms)]\n", 
+    printf("usage: client [-h SERV_ADDR(%s)]\n"
+           "              [-p SERV_PORT_BEGIN(%d)]\n"
+           "              [-n SOCK_NUM(%d)]\n"
+           "              [-r SERV_PORT_RANGE(%d)]\n"
+           "              [-l PACKET_LENGTH(%d)]\n"
+           "              [-f MAX_LIFE_TIME(%d ms)]\n", 
            SERV_ADDR, SERV_PORT_BEGIN, SOCK_NUM,
            SERV_PORT_RANGE, PACKET_LENGTH, MAX_LIFE_TIME);
 }
