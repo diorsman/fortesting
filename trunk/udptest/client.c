@@ -24,32 +24,25 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
 #include <pthread.h>
 #include <webmon.h>
-#include <sys/epoll.h>
-#include <sys/resource.h>
-#include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define SERV_ADDR           "192.168.8.56"
-#define SERV_PORT_BEGIN     8000
-#define SERV_PORT_RANGE     200
-#define SOCK_NUM_LIMIT      10000
-#define SOCK_NUM            200
-#define PACKET_MAX_LENGTH   2048
-#define PACKET_LENGTH       18 /* 46 - IP_HDR_LEN - UDP_HDR_LEN = 18 */
+#include "common.h"
+
+#define SERV1_ADDR          "192.168.8.56"
+#define PARALLEL_CLIENT     100
+#define FRAME_LENGTH        64
 #define MAX_LIFE_TIME       1000 /* ms */
-#define ERR \
-        do { \
-            fprintf(stderr, \
-                    "Exception from (%s:%d), errno = %d.\n", \
-                    __FILE__, __LINE__, errno); \
-        } while (0);
+/* for ethernet */
+#define UDP_PACKET_LEN_MIN  18
+#define UDP_PACKET_LEN_MAX  1472
 
 struct dlist_t {
     struct dlist_t *prev;
@@ -57,6 +50,7 @@ struct dlist_t {
 };
 
 enum conn_status_e {
+    UNINITED, 
     FREE,
     SENDING,
     SENT
@@ -69,22 +63,20 @@ struct conn_item_t {
     enum conn_status_e status;
     unsigned long seqno;
     struct sockaddr_in daddr;
-    unsigned long long send_time;
+    unsigned long long send_time; /* ms */
 };
 
-static char *serv_addr_def[] = {SERV_ADDR};
+static char *serv_addr_def[] = {SERV1_ADDR, };
 static char **serv_addr = serv_addr_def;
 static int serv_addr_count = 1;
 static int serv_port_begin = SERV_PORT_BEGIN;
-static int serv_port_range = SERV_PORT_RANGE;
-static int sock_num = SOCK_NUM;
-static int packet_length = PACKET_LENGTH;
+static int parallel_client = PARALLEL_CLIENT;
+static int packet_length = FRAME_LENGTH - 46;
 static int max_life_time = MAX_LIFE_TIME;
 
-static struct conn_item_t conn_arr[SOCK_NUM_LIMIT];
+static struct conn_item_t conn_arr[SERV_PORT_RANGE];
 static struct dlist_t wait_queue;
 static unsigned long cur_seqno = 0;
-static unsigned long cur_dest_port_offset = 0;
 static int sock_begin;
 
 /* for stat */
@@ -155,34 +147,6 @@ err:
     return NULL;
 }
 
-static int
-setlimits(int maxfd)
-{
-    struct rlimit rlmt;
-
-    if (getrlimit(RLIMIT_NOFILE, &rlmt))
-        return -1;
-    rlmt.rlim_cur = maxfd;
-    rlmt.rlim_max = maxfd;
-    if (setrlimit(RLIMIT_NOFILE, &rlmt))
-        return -1;
-    return 0;
-}
-
-static int
-setnoblock(int fd)
-{
-    int flag, ret;
-
-    flag = fcntl(fd, F_GETFL);
-    if (flag == -1)
-        return -1;
-    ret = fcntl(fd, F_SETFL, flag | O_NONBLOCK);
-    if (ret == -1)
-        return -1;
-    return 0;
-}
-
 static void 
 sighandler(int signo)
 {
@@ -208,19 +172,22 @@ sighandler(int signo)
  *  1, complete
  */
 static int
-send_udp_packet(int sock_fd)
+send_udp_packet(int sock_fd, int bidir)
 {
-    static char packet_data[PACKET_MAX_LENGTH] = {0};
+    static char packet_data[PACKET_LENGTH_MAX] = {0};
+    struct udpdata_t *ud;
     int idx, ret;
     struct timeval tv;
 
     /* init send buffer */
-    if (packet_data[sizeof(unsigned long)] == 0)
+    ud = (struct udpdata_t *)packet_data;
+    if (ud->data[0] == 0)
         memset(packet_data, 0xaa, sizeof(packet_data));
 
     /* get conn index */
     idx = sock_fd - sock_begin;
-    if (conn_arr[idx].status != FREE
+    if (conn_arr[idx].status != UNINITED
+        && conn_arr[idx].status != FREE 
         && conn_arr[idx].status != SENDING) 
     {
         ERR;
@@ -228,21 +195,28 @@ send_udp_packet(int sock_fd)
     }
 
     /* set seqno */
-    if (conn_arr[idx].status == FREE) {
+    if (conn_arr[idx].status == UNINITED) {
         /* new packet */
         conn_arr[idx].status = SENDING;
         conn_arr[idx].seqno = cur_seqno++;
-        memcpy(packet_data, &conn_arr[idx].seqno, sizeof(unsigned long));
         /* set dest addr info */
         memset(&conn_arr[idx].daddr, 0, sizeof(conn_arr[idx].daddr));
         conn_arr[idx].daddr.sin_family = AF_INET;
         conn_arr[idx].daddr.sin_addr.s_addr = 
-            inet_addr(serv_addr[cur_seqno % serv_addr_count]);
-        conn_arr[idx].daddr.sin_port = htons(serv_port_begin + 
-            (cur_dest_port_offset++) % serv_port_range);
-    } else if (conn_arr[idx].status == SENDING) {
-        memcpy(packet_data, &conn_arr[idx].seqno, sizeof(unsigned long));
+            inet_addr(serv_addr[idx % serv_addr_count]);
+        conn_arr[idx].daddr.sin_port = htons(serv_port_begin + idx);
+    } else if (conn_arr[idx].status == FREE) {
+        /* new packet */
+        conn_arr[idx].status = SENDING;
+        conn_arr[idx].seqno = cur_seqno++;
     }
+
+    /* packets */
+    if (bidir)
+        ud->type = BIDIR_REQ;
+    else
+        ud->type = REQ;
+    ud->seqno = conn_arr[idx].seqno;
 
     /* send */
     ret = sendto(sock_fd, packet_data, packet_length, 0, 
@@ -280,10 +254,11 @@ send_udp_packet(int sock_fd)
  *  1, complete
  */
 static int
-recv_udp_packet(int sock_fd)
+recv_udp_packet(int sock_fd, int bidir)
 {
-    int idx, ret, addr_len, i;
-    char rbuf[PACKET_MAX_LENGTH + 1];
+    int idx, ret, addr_len, i, expect_len;
+    struct udpdata_t *ud;
+    char rbuf[PACKET_LENGTH_MAX + 1];
     struct sockaddr_in faddr;
     struct timeval tv;
 
@@ -294,10 +269,15 @@ recv_udp_packet(int sock_fd)
         exit(1);
     }
 
+    if (bidir)
+        expect_len = packet_length;
+    else
+        expect_len = sizeof(struct udpdata_t);
+
     /* recv */
     while (1) {
         addr_len = sizeof(faddr);
-        ret = recvfrom(sock_fd, rbuf, packet_length + 1, 0, 
+        ret = recvfrom(sock_fd, rbuf, sizeof(rbuf), 0, 
                        (struct sockaddr *)&faddr, 
                        (socklen_t *)&addr_len);
         if (ret == -1) {
@@ -310,9 +290,8 @@ recv_udp_packet(int sock_fd)
             }
         }
 
-#if 0
         /* check length */
-        if (ret != packet_length) {
+        if (ret != expect_len) {
             /* ignore */
             continue;
         }
@@ -321,54 +300,29 @@ recv_udp_packet(int sock_fd)
             || faddr.sin_addr.s_addr != conn_arr[idx].daddr.sin_addr.s_addr
             || faddr.sin_port != conn_arr[idx].daddr.sin_port)
         {
-            /* reget */
-            reget_count++;
+            /* ignore */
             continue;
         }
 
         /* check received data */
+        ud = (struct udpdata_t *)rbuf;
         /* check seqno */
-        if (memcmp((char *)(&conn_arr[idx].seqno), rbuf, 
-                   sizeof(unsigned long)) != 0) 
-        {
+        if (conn_arr[idx].seqno != ud->seqno) {
             /* reget */
             reget_count++;
             continue;
         }
-        /* check data */
-        for (i = sizeof(unsigned long); i < packet_length; i++) {
-            if (rbuf[i] != (char)0xaa) {
-                /* data error */
-                data_error++;
-                /* end */
-                goto data_error;
+        if (bidir) {
+            /* check data */
+            for (i = sizeof(struct udpdata_t); i < expect_len; i++) {
+                if (rbuf[i] != (char)0xaa) {
+                    /* data error */
+                    data_error++;
+                    /* end */
+                    goto data_error;
+                }
             }
         }
-#else
-        /* check length */
-        if (ret != sizeof(unsigned long)) {
-            /* ignore */
-            continue;
-        }
-        /* check from */
-        if (addr_len != sizeof(faddr) 
-            || faddr.sin_addr.s_addr != conn_arr[idx].daddr.sin_addr.s_addr
-            || faddr.sin_port != conn_arr[idx].daddr.sin_port)
-        {
-            /* reget */
-            reget_count++;
-            continue;
-        }
-        /* check received data */
-        /* check seqno */
-        if (memcmp((char *)(&conn_arr[idx].seqno), rbuf, 
-                   sizeof(unsigned long)) != 0) 
-        {
-            /* reget */
-            reget_count++;
-            continue;
-        }
-#endif
 
         /* recv all */
         gettimeofday(&tv, NULL);
@@ -394,13 +348,11 @@ static void
 show_help(void)
 {
     printf("usage: client [-h SERV_ADDR(%s)]\n"
-           "              [-p SERV_PORT_BEGIN(%d)]\n"
-           "              [-n SOCK_NUM(%d)]\n"
-           "              [-r SERV_PORT_RANGE(%d)]\n"
-           "              [-l PACKET_LENGTH(%d)]\n"
-           "              [-f MAX_LIFE_TIME(%d ms)]\n", 
-           SERV_ADDR, SERV_PORT_BEGIN, SOCK_NUM,
-           SERV_PORT_RANGE, PACKET_LENGTH, MAX_LIFE_TIME);
+           "              [-n PARALLEL_CLIENT(%d)]\n"
+           "              [-l FRAME_LENGTH(%d)]\n"
+           "              [-f MAX_LIFE_TIME(%d ms)]\n" 
+           "              [-b BIDIRECTIONAL(disabled)]\n", 
+           SERV1_ADDR, PARALLEL_CLIENT, FRAME_LENGTH, MAX_LIFE_TIME);
 }
 
 /**
@@ -509,6 +461,7 @@ avg_time_sample(void *arg, double *ret)
     return 0;
 }
 
+#if 0
 static int
 wait_queue_length_sample(void *arg, double *ret)
 {
@@ -516,7 +469,6 @@ wait_queue_length_sample(void *arg, double *ret)
     return 0;
 }
 
-#if 0
 static int
 data_error_sample(void *arg, double *ret)
 {
@@ -589,12 +541,14 @@ struct webmon_graph_t my_graphs[] = {
      {avg_time_sample},
      {NULL},
     },
+#if 0
     /* for wait queue length */
     {"等待队列长度", 1, 500, 0,
      {"n"},
      {wait_queue_length_sample},
      {NULL},
     },
+#endif
     /* for error stat */
     {"丢包速率", 1, 100, 0,
      {"packets/second"},
@@ -614,8 +568,8 @@ wrap_webmon_run(void *arg)
 int
 main(int argc, char *argv[])
 {
-    int i, ret, pollfd, sock = -1, nfd, fd, idx;
-    struct epoll_event epollevt, outevtarr[SOCK_NUM_LIMIT];
+    int i, ret, pollfd, sock = -1, nfd, fd, idx, bidirectional = 0;
+    struct epoll_event epollevt, outevtarr[SERV_PORT_RANGE];
     struct timeval tv;
     unsigned long long cur_time;
     struct dlist_t *dl;
@@ -624,7 +578,7 @@ main(int argc, char *argv[])
 
     /* parse line args */
     while (1) {
-        ret = getopt(argc, argv, "h:p:r:n:l:f:");
+        ret = getopt(argc, argv, "h:n:l:f:b");
         if (ret == -1) {
             if (argv[optind] != NULL) {
                 show_help();
@@ -640,24 +594,23 @@ main(int argc, char *argv[])
                 exit(1);
             }
             break;
-        case 'p':      /* SERV_PORT_BEGIN */
-            serv_port_begin = atoi(optarg);
+        case 'n':      /* PARALLEL_CLIENT */
+            parallel_client = atoi(optarg);
+            if (parallel_client > SERV_PORT_RANGE)
+                parallel_client = SERV_PORT_RANGE;
             break;
-        case 'r':      /* SERV_PORT_RANGE */
-            serv_port_range = atoi(optarg);
-            break;
-        case 'n':      /* SOCK_NUM */
-            sock_num = atoi(optarg);
-            if (sock_num > SOCK_NUM_LIMIT)
-                sock_num = SOCK_NUM_LIMIT;
-            break;
-        case 'l':      /* PACKET_LENGTH */
-            packet_length = atoi(optarg);
-            if (packet_length > PACKET_MAX_LENGTH)
-                packet_length = PACKET_MAX_LENGTH;
+        case 'l':      /* FRAME_LENGTH */
+            packet_length = atoi(optarg) - 46;
+            if (packet_length < UDP_PACKET_LEN_MIN)
+                packet_length = UDP_PACKET_LEN_MIN;
+            if (packet_length > UDP_PACKET_LEN_MAX)
+                packet_length = UDP_PACKET_LEN_MAX;
             break;
         case 'f':      /* MAX_LIFE_TIME */
             max_life_time = atoi(optarg);
+            break;
+        case 'b':      /* BIDIRECTIONAL */
+            bidirectional = 1;
             break;
         default:
             show_help();
@@ -676,21 +629,21 @@ main(int argc, char *argv[])
     signal(SIGQUIT, sighandler);
 
     /* set resource limit */
-    ret = setlimits(sock_num + 20);
+    ret = setlimits(parallel_client + 20);
     if (ret == -1) {
         ERR;
         exit(1);
     }
 
     /* init epoll */
-    pollfd = epoll_create(sock_num);
+    pollfd = epoll_create(parallel_client);
     if (pollfd == -1) {
         ERR;
         exit(1);
     }
 
     /* create socket array */
-    for (i = 0; i < sock_num; i++) {
+    for (i = 0; i < parallel_client; i++) {
         /* create socket */
         sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock == -1) {
@@ -716,7 +669,7 @@ main(int argc, char *argv[])
         }
     }
     /* check */
-    if (sock != sock_begin + sock_num - 1) {
+    if (sock != sock_begin + parallel_client - 1) {
         ERR;
         exit(1);
     }
@@ -726,7 +679,7 @@ main(int argc, char *argv[])
         ERR;
         exit(1);
     }
-    sd = webmon_create("updtest client", "0.0.0.0", 8888, 900, 4, 1, 1, 1);
+    sd = webmon_create("updtest client", "0.0.0.0", 8888, 900, 4, 1, 0, 0);
     if (sd == NULL) {
         ERR;
         exit(1);
@@ -735,21 +688,11 @@ main(int argc, char *argv[])
     webmon_set_textinfo_callback(sd, textinfo_cb, NULL);
     webmon_set_free_textinfo_callback(sd, free_textinfo_cb);
     /* add graphs */
-    if (webmon_addgraph(sd, &my_graphs[0]) == -1) {
-        ERR;
-        exit(1);
-    }
-    if (webmon_addgraph(sd, &my_graphs[1]) == -1) {
-        ERR;
-        exit(1);
-    }
-    if (webmon_addgraph(sd, &my_graphs[2]) == -1) {
-        ERR;
-        exit(1);
-    }
-    if (webmon_addgraph(sd, &my_graphs[3]) == -1) {
-        ERR;
-        exit(1);
+    for (i = 0; i < sizeof(my_graphs) / sizeof(struct webmon_graph_t); i++) {
+        if (webmon_addgraph(sd, &my_graphs[i]) == -1) {
+            ERR;
+            exit(1);
+        }
     }
     /* start new thread */
     if (pthread_create(&ptid, NULL, wrap_webmon_run, sd) != 0) {
@@ -760,7 +703,7 @@ main(int argc, char *argv[])
     /* main loop */
     while (1) {
         /* epoll events */
-        nfd = epoll_wait(pollfd, outevtarr, sock_num, 
+        nfd = epoll_wait(pollfd, outevtarr, parallel_client, 
                          max_life_time / 5/* ms */);
         if (nfd == -1) {
             if (errno == EINTR)
@@ -773,7 +716,7 @@ main(int argc, char *argv[])
 
                 if (outevtarr[i].events & EPOLLOUT) {
                     /* send */
-                    if (send_udp_packet(fd) == 1) {
+                    if (send_udp_packet(fd, bidirectional) == 1) {
                         memset(&epollevt, 0, sizeof(epollevt));
                         epollevt.events = EPOLLIN;
                         epollevt.data.fd = fd;
@@ -785,7 +728,7 @@ main(int argc, char *argv[])
                     }
                 } else if (outevtarr[i].events & EPOLLIN) {
                     /* recv */
-                    if (recv_udp_packet(fd) == 1) {
+                    if (recv_udp_packet(fd, bidirectional) == 1) {
                         memset(&epollevt, 0, sizeof(epollevt));
                         epollevt.events = EPOLLOUT;
                         epollevt.data.fd = fd;

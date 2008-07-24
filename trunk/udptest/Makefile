@@ -7,17 +7,20 @@ LIBS=-lwebmon -lz -lpthread
 
 all: client server
 
-client: client.o
-	${CC} ${LDFLAGS} -o client client.o ${LIBS}
+client: client.o common.o
+	${CC} ${LDFLAGS} -o client client.o common.o ${LIBS}
 
-client.o: client.c
+client.o: client.c common.h
 	${CC} ${CFLAGS} -c client.c
 
-server: server.o
-	${CC} ${LDFLAGS} -o server server.o ${LIBS}
+server: server.o common.o
+	${CC} ${LDFLAGS} -o server server.o common.o ${LIBS}
 
-server.o: server.c
+server.o: server.c common.h
 	${CC} ${CFLAGS} -c server.c
+
+common.o: common.c common.h
+	${CC} ${CFLAGS} -c common.c
 
 clean: 
 	rm -f *.o client server
