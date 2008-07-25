@@ -40,6 +40,7 @@
 #define PARALLEL_CLIENT     100
 #define FRAME_LENGTH        64
 #define MAX_LIFE_TIME       1000 /* ms */
+#define SHOCK_SCOPE         100
 /* for ethernet */
 #define UDP_PACKET_LEN_MIN  18
 #define UDP_PACKET_LEN_MAX  1472
@@ -86,6 +87,8 @@ static unsigned long data_error = 0;
 static unsigned long lost_count = 0;
 static unsigned long reget_count = 0;
 static int wait_queue_len = 0;
+
+static unsigned long shock_data[SHOCK_SCOPE] = {0};
 
 static char **
 parse_serv_addr(const char *arg, int *num)
@@ -256,7 +259,7 @@ send_udp_packet(int sock_fd, int bidir)
 static int
 recv_udp_packet(int sock_fd, int bidir)
 {
-    int idx, ret, addr_len, i, expect_len;
+    int idx, ret, addr_len, i, expect_len, last_time;
     struct udpdata_t *ud;
     char rbuf[PACKET_LENGTH_MAX + 1];
     struct sockaddr_in faddr;
@@ -326,8 +329,12 @@ recv_udp_packet(int sock_fd, int bidir)
 
         /* recv all */
         gettimeofday(&tv, NULL);
-        resp_time += tv.tv_sec * 1000 + tv.tv_usec / 1000 - conn_arr[idx].send_time;
+        last_time = tv.tv_sec * 1000 + tv.tv_usec / 1000 - conn_arr[idx].send_time;
+        resp_time += last_time;
         resp_count++;
+        /* update shock_data */
+        if (last_time < SHOCK_SCOPE) 
+            shock_data[last_time]++;
 data_error:
         conn_arr[idx].status = FREE;
         /* detach from wait_queue */
@@ -363,50 +370,18 @@ static time_t begin_time;
 static const char **
 textinfo_cb(void *arg)
 {
-    char **rets, strbuf[1024];
-
-    rets = calloc(3, sizeof(char *));
-    if (rets == NULL)
-        return NULL;
+    static char str1[1024], str2[1024];
+    static char *rets[3] = {str1, str2, NULL};
 
     /* running time */
-    snprintf(strbuf, sizeof(strbuf), 
+    snprintf(str1, sizeof(str1), 
              "I have been running for %u seconds.", 
              (int)(time(NULL) - begin_time));
-    *rets = strdup(strbuf);
-    if (*rets == NULL)
-        goto err;
     /* stats */
-    snprintf(strbuf, sizeof(strbuf), 
+    snprintf(str2, sizeof(str2), 
              "Packets Statistics: sent/received(%lu), lost(%lu).", 
              resp_count, lost_count);
-    *(rets + 1) = strdup(strbuf);
-    if (*(rets + 1) == NULL)
-        goto err;
-    /* end */
-    *(rets + 2) = NULL;
-
     return (const char **)rets;
-
-err:
-    if (*rets != NULL)
-        free(*rets);
-    if (*(rets + 1) != NULL)
-        free(*(rets + 1));
-    free(rets);
-    return NULL;
-}
-
-static void
-free_textinfo_cb(void *arg)
-{
-    char **pp = arg;
-
-    while (*pp != NULL) {
-        free(*pp);
-        pp++;
-    }
-    free(arg);
 }
 
 static int
@@ -557,6 +532,27 @@ struct webmon_graph_t my_graphs[] = {
     },
 };
 
+static const struct webmon_graph_data_t ** 
+graph_cb(void *arg)
+{
+    int i;
+
+    static double values[SHOCK_SCOPE];
+    static struct webmon_graph_data_t sd = {"收包延迟分布", 
+                                            SHOCK_SCOPE, 
+                                            1, 
+                                            100.0, 
+                                            0.0, 
+                                            {"ms", }, 
+                                            {values, }
+                                           };
+    static struct webmon_graph_data_t *rets[2] = {&sd, NULL}; 
+
+    for (i = 0; i < SHOCK_SCOPE; i++)
+        values[i] = ((double)shock_data[i]) * 100 / resp_count;
+    return (const struct webmon_graph_data_t **)rets;
+}
+
 static void *
 wrap_webmon_run(void *arg)
 {
@@ -673,7 +669,7 @@ main(int argc, char *argv[])
         ERR;
         exit(1);
     }
-        
+
     /* init and craete webmon */
     if (webmon_init() == -1) {
         ERR;
@@ -686,7 +682,6 @@ main(int argc, char *argv[])
     }
     /* set textinfo callback */
     webmon_set_textinfo_callback(sd, textinfo_cb, NULL);
-    webmon_set_free_textinfo_callback(sd, free_textinfo_cb);
     /* add graphs */
     for (i = 0; i < sizeof(my_graphs) / sizeof(struct webmon_graph_t); i++) {
         if (webmon_addgraph(sd, &my_graphs[i]) == -1) {
@@ -694,6 +689,8 @@ main(int argc, char *argv[])
             exit(1);
         }
     }
+    /* set callback for user defined graphs */
+    webmon_set_graph_callback(sd, graph_cb, NULL);
     /* start new thread */
     if (pthread_create(&ptid, NULL, wrap_webmon_run, sd) != 0) {
         ERR;

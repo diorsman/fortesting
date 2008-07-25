@@ -43,7 +43,7 @@
 #define REQ_MAX         4096
 #define URL_MAX         1024
 #define POLL_INTERVAL   600
-#define GRAPH_WIDTH_DEF 800
+#define GRAPH_WIDTH_DEF 900
 #define COMPRESS_HDRLEN 1024
 #define CHUNK_HDRLEN_1  10
 #define CHUNK_HDRLEN_2  7
@@ -82,6 +82,9 @@ struct webmon_t {
     FREE_TEXTINFO_CB free_textinfo_cb;
     int graph_count;
     const struct webmon_graph_t *graphs[GRAPH_MAX];
+    GRAPH_CB graph_cb;
+    void *graph_cb_arg;
+    FREE_GRAPH_CB free_graph_cb;
     /* dync data */
     time_t stat_begin_time;
     double *values[GRAPH_MAX][LINE_COUNT_MAX];
@@ -364,6 +367,21 @@ webmon_addgraph(void *webmon, const struct webmon_graph_t *graph)
     s->graph_count++;
     /* ok */
     return 0;
+}
+
+void
+webmon_set_graph_callback(void *webmon, GRAPH_CB cb, void *arg)
+{
+    struct webmon_t *s = (struct webmon_t *)webmon;
+    s->graph_cb = cb;
+    s->graph_cb_arg = arg;
+}
+
+void 
+webmon_set_free_graph_callback(void *webmon, FREE_GRAPH_CB cb)
+{
+    struct webmon_t *s = (struct webmon_t *)webmon;
+    s->free_graph_cb = cb;
 }
 
 static int
@@ -870,6 +888,88 @@ make_statpage(struct webmon_t *s)
             goto err;
         if (string_add(out_str, buf, ret) == -1)
             goto err;
+    }
+    /* for each graph need callback */
+    if (s->graph_cb != NULL) {
+        const struct webmon_graph_data_t **gd, **gd_bak;
+
+        gd = s->graph_cb(s->graph_cb_arg);
+        /* backup */
+        gd_bak = gd;
+        if (gd == NULL) 
+            goto err;
+        /* draw */
+        while (*gd != NULL) {
+            /* statpage_graph_begin */
+            ret = snprintf(buf, sizeof(buf), statpage_graph_begin, 
+                (*gd)->nsample > GRAPH_WIDTH_DEF ? (*gd)->nsample : GRAPH_WIDTH_DEF, 
+                (*gd)->line_count); 
+            if (ret >= sizeof(buf))
+                goto err;
+            if (string_add(out_str, buf, ret) == -1)
+                goto err;
+            /* values 0 */
+            for (j = 0; j < (*gd)->nsample; j++) {
+                /* value */
+                ret = snprintf(buf, sizeof(buf), "%0.2f,", 
+                               (*gd)->values[0][j]);
+                if (ret >= sizeof(buf))
+                    goto err;
+                if (string_add(out_str, buf, ret) == -1)
+                    goto err;
+            }
+            /* have more than 1 line? */
+            if ((*gd)->line_count > 1) {
+                for (k = 1; k < (*gd)->line_count; k++) {
+                    /* statpage_graph_mid */
+                    ret = snprintf(buf, sizeof(buf), statpage_graph_mid, k);
+                    if (ret >= sizeof(buf))
+                        goto err;
+                    if (string_add(out_str, buf, ret) == -1)
+                        goto err;
+                    /* values k */
+                    for (j = 0; j < (*gd)->nsample; j++) {
+                        /* value */
+                        ret = snprintf(buf, sizeof(buf), "%0.2f,", 
+                                       (*gd)->values[k][j]);
+                        if (ret >= sizeof(buf))
+                            goto err;
+                        if (string_add(out_str, buf, ret) == -1)
+                            goto err;
+                    }
+                }
+            }
+            /* statpage_graph_end */
+            /* for labels */
+            labels_str = string_create(0, 0);
+            if (labels_str == NULL)
+                goto err;
+            for (m = 0; m < (*gd)->line_count; m++) {
+                if (string_add(labels_str, (*gd)->line_labels[m], 0) 
+                    == -1) 
+                {
+                    string_free(labels_str);
+                    goto err;
+                }
+                if (string_add(labels_str, ",", 1) == -1) {
+                    string_free(labels_str);
+                    goto err;
+                }
+            }
+            ret = snprintf(buf, sizeof(buf), statpage_graph_end, 
+                           (*gd)->high_limit, (*gd)->low_limit, 
+                           string_get(labels_str), (*gd)->desc); 
+            string_free(labels_str);
+            if (ret >= sizeof(buf))
+                goto err;
+            if (string_add(out_str, buf, ret) == -1)
+                goto err;
+            /* next */
+            gd++;
+        }
+        /* need free? */
+        if (s->free_graph_cb != NULL)
+            s->free_graph_cb(gd_bak);
     }
     /* for page end */
     ret = snprintf(buf, sizeof(buf), statpage_end, SOFTWARE, VERSION);
