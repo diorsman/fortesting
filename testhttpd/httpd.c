@@ -122,6 +122,7 @@ static int conns_limit = CONNS_LIMIT_DEF;
 static char *root_dir = ROOT_DIR_DEF;
 static int listen_port = LISTEN_PORT;
 static int webmon_port = WEBMON_PORT;
+static int enable_fake_page = 0;
 
 /* for statistics */
 static unsigned long long accepted = 0;
@@ -133,7 +134,8 @@ show_help(void)
     printf("usage: testhttpd [-c(%d): max connection number]\n"
            "                 [-d(%s): www root directory]\n"
            "                 [-p(%d): TestHttpd's listen port]\n"
-           "                 [-p(%d): webmon's listen port]\n",
+           "                 [-p(%d): webmon's listen port]\n"
+           "                 [-b: enable fake page]\n",
            conns_limit, root_dir, listen_port, webmon_port);
 }
 
@@ -866,20 +868,22 @@ parse_request(struct connection_t *c)
         return -1;
     }
     /* request memory block or stat page? */
-    if (strncmp(url, "local/block/", 12) == 0) {
-        size = atoi(url + 12);
-        if (size <= 0 || size > BLOCK_MAX) {
-            send_error(c, 400);
-            return -1;
-        }
-        c->entity = make_blockdata(size);
-        if (c->entity == NULL) {
-            send_error(c, 500);
-            return -1;
-        } else {
-            /* need free */
-            c->entity_dyn = 1;
-            return 0;
+    if (enable_fake_page) {
+        if (strncmp(url, "local/block/", 12) == 0) {
+            size = atoi(url + 12);
+            if (size <= 0 || size > BLOCK_MAX) {
+                send_error(c, 400);
+                return -1;
+            }
+            c->entity = make_blockdata(size);
+            if (c->entity == NULL) {
+                send_error(c, 500);
+                return -1;
+            } else {
+                /* need free */
+                c->entity_dyn = 1;
+                return 0;
+            }
         }
     }
     /* normal file */
@@ -905,7 +909,7 @@ main(int argc, char *argv[])
 
     /* parse arguments line */
     while (1) {
-        ret = getopt(argc, argv, "c:d:p:w:");
+        ret = getopt(argc, argv, "c:d:p:w:f");
         if (ret == -1) {
             if (argv[optind] != NULL) {
                 show_help();
@@ -954,6 +958,9 @@ main(int argc, char *argv[])
                         "webmon's listen port must be different with TestHttpd's listen port.\n");
                 exit(1);
             }
+            break;
+        case 'f':
+            enable_fake_page = 1;
             break;
         default:
             show_help();
