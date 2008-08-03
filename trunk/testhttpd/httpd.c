@@ -39,6 +39,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <asm/param.h>
+#include <webmon.h>
+#include <pthread.h>
 
 #define SOFTWARE        "TestHttpd"
 #define VERSION         "0.1.1"
@@ -51,6 +53,7 @@
 #define CONNS_LIMIT_DEF 1000
 #define ROOT_DIR_DEF    "/var/www/html"
 #define LISTEN_PORT     80
+#define WEBMON_PORT     8080
 
 #define ERR(string) \
         do { \
@@ -115,17 +118,23 @@ static size_t entity_count, entity_alloced;
 static int ignore_len;
 static struct entity_t *error_arr = NULL;
 static size_t error_count, error_alloced;
-static int conns_limit = CONNS_LIMIT_DEF, cur_conns = 0;
+static int conns_limit = CONNS_LIMIT_DEF;
 static char *root_dir = ROOT_DIR_DEF;
 static int listen_port = LISTEN_PORT;
+static int webmon_port = WEBMON_PORT;
+
+/* for statistics */
+static unsigned long long accepted = 0;
+static int cur_conns = 0;
 
 static void 
 show_help(void)
 {
     printf("usage: testhttpd [-c(%d): max connection number]\n"
            "                 [-d(%s): www root directory]\n"
-           "                 [-p(%d): listen port]\n",
-           conns_limit, root_dir, listen_port);
+           "                 [-p(%d): TestHttpd's listen port]\n"
+           "                 [-p(%d): webmon's listen port]\n",
+           conns_limit, root_dir, listen_port, webmon_port);
 }
 
 #define ERROR_ALLOC_STEP    16
@@ -380,7 +389,8 @@ listen_init(void)
     }
     /* SO_REUSEADDR */
     on = 1;
-    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&on, sizeof(on));
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, 
+               (const void *)&on, sizeof(on));
     /* bind */
     localaddr.sin_family = AF_INET;
     localaddr.sin_addr.s_addr = inet_addr("0.0.0.0");
@@ -400,6 +410,84 @@ listen_init(void)
     }
 
     return listenfd;
+}
+
+/* for webmon */
+static time_t begin_time;
+
+static const char **
+textinfo_cb(void *arg)
+{
+    static char str1[1024];
+    static char *rets[2] = {str1, NULL};
+
+    /* running time */
+    snprintf(str1, sizeof(str1),
+             "I have been running for %u seconds and accepted %llu connections.",
+             (int)(time(NULL) - begin_time), accepted);
+    return (const char **)rets;
+}
+
+static int
+accepted_sample(void *arg, double *ret)
+{
+    int interval/* interval in ms */;
+    struct timeval tv;
+
+    static int inited = 0;
+    static unsigned long long last_count;
+    static struct timeval last_sample_time;
+
+    /* compute */
+    if (!inited) {
+        *ret = 0.0;
+        /* for later sample */
+        last_count = accepted;
+        gettimeofday(&last_sample_time, NULL);
+        /* inited */
+        inited = 1;
+    } else {
+        /* compute */
+        gettimeofday(&tv, NULL);
+        interval = (tv.tv_sec - last_sample_time.tv_sec) * 1000
+                   + (tv.tv_usec - last_sample_time.tv_usec) / 1000;
+        *ret = ((double)(accepted - last_count) * 1000) / interval;
+        /* for next sample */
+        last_count = accepted;
+        last_sample_time = tv;
+    }
+    /* ok */
+    return 0;
+}
+
+static int
+conns_sample(void *arg, double *ret)
+{
+    *ret = (double)cur_conns;
+    return 0;
+}
+
+struct webmon_graph_t my_graphs[] = {
+    /* for accepted */
+    {"每秒接受新连接速率", 1, 10000, 0,
+     {"n/second"},
+     {accepted_sample},
+     {NULL},
+    },
+    /* for cur_conns */
+    {"并发连接数", 1, 1000, 0,
+     {"n"},
+     {conns_sample},
+     {NULL},
+    },
+};
+
+static void *
+wrap_webmon_run(void *arg)
+{
+    begin_time = time(NULL);
+    webmon_run(arg);
+    return NULL;
 }
 
 static void 
@@ -649,7 +737,9 @@ de_dotdot(char *file)
         (void) strcpy(cp2 + 1, cp + 4);
     }
     /* Also elide any xxx/.. at the end. */
-    while ((l = strlen(file)) > 3 && strcmp((cp = file + l - 3), "/..") == 0) {
+    while ((l = strlen(file)) > 3 
+           && strcmp((cp = file + l - 3), "/..") == 0) 
+    {
         for (cp2 = cp - 1; cp2 >= file && *cp2 != '/'; --cp2)
             continue;
         if (cp2 < file)
@@ -719,7 +809,9 @@ parse_request(struct connection_t *c)
         send_error(c, 400);
         return -1;
     }
-    if (q - p == 4 && p[0] == 'H' && p[1] == 'E' && p[2] == 'A' && p[3] == 'D') {
+    if (q - p == 4 && p[0] == 'H' && p[1] == 'E' 
+        && p[2] == 'A' && p[3] == 'D') 
+    {
         /* HEAD */
         c->method = METHOD_HEAD;
     } else if (q - p == 3 && p[0] == 'G' && p[1] == 'E' && p[2] == 'T') {
@@ -766,7 +858,8 @@ parse_request(struct connection_t *c)
     /* for security */
     de_dotdot(url);
     if (url[0] == '/'
-        || (url[0] == '.' && url[1] == '.' && (url[2] == '\0' || url[2] == '/')))
+        || (url[0] == '.' && url[1] == '.' 
+            && (url[2] == '\0' || url[2] == '/')))
     {
         /* Bad Request */
         send_error(c, 400);
@@ -807,10 +900,12 @@ main(int argc, char *argv[])
     struct rlimit rlmt;
     struct epoll_event epollevt, *outevtarr;
     struct connection_t *conn;
+    void *sd;
+    pthread_t ptid;
 
     /* parse arguments line */
     while (1) {
-        ret = getopt(argc, argv, "c:d:p:");
+        ret = getopt(argc, argv, "c:d:p:w:");
         if (ret == -1) {
             if (argv[optind] != NULL) {
                 show_help();
@@ -822,13 +917,15 @@ main(int argc, char *argv[])
         case 'c':
             conns_limit = atoi(optarg);
             if (conns_limit < 1 || conns_limit > 10000) {
-                fprintf(stderr, "The max connection number should be in [1, 10000].\n");
+                fprintf(stderr, 
+                        "The max connection number should be in [1, 10000].\n");
                 exit(1);
             }
             break;
         case 'd':
             if (optarg[0] != '/') {
-                fprintf(stderr, "The www root directory should be absolute path.\n");
+                fprintf(stderr, 
+                        "The www root directory should be an absolute path.\n");
                 exit(1);
             }
             root_dir = strdup(optarg);
@@ -840,7 +937,21 @@ main(int argc, char *argv[])
         case 'p':
             listen_port = atoi(optarg);
             if (listen_port < 1 || listen_port > 65535) {
-                fprintf(stderr, "The listen port should be in [1, 65535].\n");
+                fprintf(stderr, 
+                        "TestHttpd's listen port should be in [1, 65535].\n");
+                exit(1);
+            }
+            break;
+        case 'w':
+            webmon_port = atoi(optarg);
+            if (webmon_port < 1 || webmon_port > 65535) {
+                fprintf(stderr, 
+                        "webmon's listen port should be in [1, 65535].\n");
+                exit(1);
+            }
+            if (webmon_port == listen_port) {
+                fprintf(stderr, 
+                        "webmon's listen port must be different with TestHttpd's listen port.\n");
                 exit(1);
             }
             break;
@@ -900,6 +1011,32 @@ main(int argc, char *argv[])
         exit(1);
     }
 
+    /* init and create webmon */
+    if (webmon_init() == -1) {
+        ERR("null");
+        exit(1);
+    }
+    sd = webmon_create("TestHttpd", "0.0.0.0", webmon_port, 
+                       900, 4, 1, 1, 1);
+    if (sd == NULL) {
+        ERR("null");
+        exit(1);
+    }
+    /* set textinfo callback */
+    webmon_set_textinfo_callback(sd, textinfo_cb, NULL);
+    /* add graphs */
+    for (i = 0; i < sizeof(my_graphs) / sizeof(struct webmon_graph_t); i++) {
+        if (webmon_addgraph(sd, &my_graphs[i]) == -1) {
+            ERR("null");
+            exit(1);
+        }
+    }
+    /* start new thread */
+    if (pthread_create(&ptid, NULL, wrap_webmon_run, sd) != 0) {
+        ERR("null");
+        exit(1);
+    }
+
     /* main loop */
     while (1) {
         nfd = epoll_wait(epollfd, outevtarr, max_fd, -1);
@@ -932,7 +1069,7 @@ main(int argc, char *argv[])
                             break;
                         }
                         /* accepted */
-                        /* stat_arr[idx].accepted++; */
+                        accepted++;
                         /* no-blocking */
                         ret = set_noblock(conn_fd);
                         if (ret == -1) {
@@ -969,10 +1106,6 @@ main(int argc, char *argv[])
                         }
                         /* update cur_conns */
                         cur_conns++;
-                        /*
-                        if (cur_conns > stat_arr[idx].max_conns)
-                            stat_arr[idx].max_conns = cur_conns;
-                        */
                     }
                 } else {
                     /* error */
@@ -1028,8 +1161,6 @@ main(int argc, char *argv[])
                             /* read some data */
                             conn->req_read += ret;
                             conn->req_buf[conn->req_read] = '\0';
-                            /* received */
-                            /* stat_arr[idx].received += ret; */
                             /* got request header? */
                             ret = got_request(conn);
                             if (ret == GR_NO_REQUEST) {
@@ -1077,8 +1208,6 @@ main(int argc, char *argv[])
                         }
                         /* send some data */
                         conn->header_sent += ret;
-                        /* sent */
-                        /* stat_arr[idx].sent += ret; */
                     }
                     /* for body */
                     if (conn->method == METHOD_GET) {
@@ -1094,14 +1223,10 @@ main(int argc, char *argv[])
                             }
                             /* send some data */
                             conn->body_sent += ret;
-                            /* sent */
-                            /* stat_arr[idx].sent += ret; */
                         }
                     }
                     /* all sent */
                     shutdown(conn->fd, SHUT_WR);
-                    /* completed */
-                    /* stat_arr[idx].completed++; */
 failed:
                     clear_connection(conn);
 for_next:
