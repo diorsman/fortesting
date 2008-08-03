@@ -29,7 +29,9 @@
 #include <ctype.h>
 #include <signal.h>
 #include <time.h>
-#include <zlib.h>
+#include <webmon.h>
+#include <pthread.h>
+#include <syslog.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -38,9 +40,6 @@
 #include <sys/epoll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <asm/param.h>
-#include <webmon.h>
-#include <pthread.h>
 
 #define SOFTWARE        "TestHttpd"
 #define VERSION         "0.1.1"
@@ -57,10 +56,9 @@
 
 #define ERR(string) \
         do { \
-            fprintf(stderr, \
-                    "Unexpected error occurred(%s:%d), errno = %d.\n" \
-                    "  AUX-Message: %s.\n", \
-                    __FILE__, __LINE__, errno, string); \
+            syslog(LOG_ERR, \
+                   "Unexpected error occurred(%s:%d), errno = %d.\n", \
+                   __FILE__, __LINE__, errno); \
         } while (0)
 
 struct entity_t {
@@ -131,7 +129,7 @@ static int cur_conns = 0;
 static void 
 show_help(void)
 {
-    printf("usage: testhttpd [-c(%d): max connection number]\n"
+    printf("usage: testhttpd [-c(%d): allowed max connections]\n"
            "                 [-d(%s): www root directory]\n"
            "                 [-p(%d): TestHttpd's listen port]\n"
            "                 [-p(%d): webmon's listen port]\n"
@@ -228,9 +226,9 @@ _get_file_list(const char *path)
 
     dir = opendir(path);
     if (dir == NULL) {
-        fprintf(stderr, 
-                "Failed to open directory(%s), errno = %d.\n", 
-                path, errno);
+        syslog(LOG_ERR, 
+               "Failed to open directory(%s), errno = %d.\n", 
+               path, errno);
         exit(1);
     }
 
@@ -254,9 +252,9 @@ _get_file_list(const char *path)
         /* get more info */
         ret = stat(file, &st);
         if (ret == -1) {
-            fprintf(stderr, 
-                    "Failed to stat file(%s), errno = %d.\n", 
-                    file, errno);
+            syslog(LOG_ERR, 
+                   "Failed to stat file(%s), errno = %d.\n", 
+                   file, errno);
             exit(1);
         }
         if (S_ISDIR(st.st_mode)) {
@@ -309,9 +307,9 @@ _get_file_list(const char *path)
             }
             fd = open(file, O_RDONLY);
             if (fd == -1) {
-                fprintf(stderr, 
-                        "Failed to open file(%s), errno = %d.\n", 
-                        file, errno);
+                syslog(LOG_ERR, 
+                       "Failed to open file(%s), errno = %d.\n", 
+                       file, errno);
                 exit(1);
             }
             ret = read(fd, (void *)entity_arr[entity_count].body, 
@@ -399,9 +397,9 @@ listen_init(void)
     localaddr.sin_port = htons(listen_port);
     ret = bind(listenfd, (struct sockaddr *)&localaddr, sizeof(localaddr));
     if (ret == -1) {
-        fprintf(stderr, 
-                "Failed to bind listen socket on (0.0.0.0:%d), errno = %d.\n",
-                listen_port, errno);
+        syslog(LOG_ERR, 
+               "Failed to bind socket on (0.0.0.0: %d), errno = %d.\n",
+               listen_port, errno);
         exit(1);
     }
     /* listen */
@@ -922,7 +920,7 @@ main(int argc, char *argv[])
             conns_limit = atoi(optarg);
             if (conns_limit < 1 || conns_limit > 10000) {
                 fprintf(stderr, 
-                        "The max connection number should be in [1, 10000].\n");
+                        "The allowed max connection number should be in [1, 10000].\n");
                 exit(1);
             }
             break;
@@ -934,7 +932,7 @@ main(int argc, char *argv[])
             }
             root_dir = strdup(optarg);
             if (root_dir == NULL) {
-                ERR("null");
+                fprintf(stderr, "Out of memory.\n");
                 exit(1);
             }
             break;
@@ -968,6 +966,10 @@ main(int argc, char *argv[])
         }
     }
 
+    /* daemonrize */
+    openlog(SOFTWARE, LOG_NDELAY | LOG_PID, LOG_DAEMON);
+    daemon(0, 0);
+
     /* set max fd */
     max_fd = conns_limit + 10;
     ret = getrlimit(RLIMIT_NOFILE, &rlmt);
@@ -981,7 +983,8 @@ main(int argc, char *argv[])
         ret = setrlimit(RLIMIT_NOFILE, &rlmt);
         if (ret == -1) {
             if (errno == EPERM)
-                fprintf(stderr, "Failed to change resource limit, operation disallowed.\n");
+                syslog(LOG_ERR, 
+                       "Failed to change resource limit, operation disallowed.\n");
             else
                 ERR("null");
             exit(1);
@@ -1023,7 +1026,7 @@ main(int argc, char *argv[])
         ERR("null");
         exit(1);
     }
-    sd = webmon_create("TestHttpd", "0.0.0.0", webmon_port, 
+    sd = webmon_create(SOFTWARE, "0.0.0.0", webmon_port, 
                        900, 4, 1, 1, 1);
     if (sd == NULL) {
         ERR("null");
@@ -1044,6 +1047,9 @@ main(int argc, char *argv[])
         exit(1);
     }
 
+    syslog(LOG_INFO, 
+           "Now TestHttpd is listening on (0.0.0.0:%d).\n", 
+           listen_port);
     /* main loop */
     while (1) {
         nfd = epoll_wait(epollfd, outevtarr, max_fd, -1);
@@ -1233,7 +1239,7 @@ main(int argc, char *argv[])
                         }
                     }
                     /* all sent */
-                    shutdown(conn->fd, SHUT_WR);
+                    //shutdown(conn->fd, SHUT_WR);
 failed:
                     clear_connection(conn);
 for_next:

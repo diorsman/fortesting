@@ -1,7 +1,8 @@
 1, libwebmon; ...done!
 2, make /local/block as an option; ...done!
-3, deamonrize;
-4, logging by syslog;
+3, deamonrize; ...done!
+4, logging by syslog; ...done!
 5, add tcp reset as an option for connection close;
+6, parse request header/source address;
 
-6, add simple cache support: ETag.
+7, add simple cache support: ETag.
