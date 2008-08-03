@@ -3,7 +3,7 @@ CFLAGS=-g -O2 -Wall
 #CFLAGS=-g -Wall
 LDFLAGS=
 OBJS=httpd.o
-LIBS=-lwebmon -lz
+LIBS=-lwebmon -lpthread -lz
 
 
 all: testhttpd

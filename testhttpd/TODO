@@ -1,4 +1,4 @@
-1, libwebmon;
+1, libwebmon; ...done!
 2, make /local/block as an option;
 3, deamonrize;
 4, logging by syslog;
