@@ -1,5 +1,5 @@
 1, libwebmon; ...done!
-2, make /local/block as an option;
+2, make /local/block as an option; ...done!
 3, deamonrize;
 4, logging by syslog;
 5, add tcp reset as an option for connection close;
