@@ -296,6 +296,7 @@ _get_file_list(const char *path)
                            "HTTP/1.1 200 OK\r\n"
                            "Server: %s/%s\r\n"
                            "Content-Length: %d\r\n"
+                           "Cache-Control: no-cache\r\n"
                            "Accept-Ranges: none\r\n"
                            "Connection: close\r\n"
                            "\r\n", 
@@ -798,32 +799,44 @@ static struct entity_t *
 make_blockdata(int size)
 {
     struct entity_t *rets;
+    char hbuf[1024];
+    int ret;
+
     static int block_inited = 0;
     static char block_buf[BLOCK_MAX];
 
     if (!block_inited) {
         memset(block_buf, '.', sizeof(block_buf));
-        snprintf(block_buf, sizeof(block_buf), 
-                 "HTTP/1.1 200 OK\r\n"
-                 "Server: %s/%s\r\n"
-                 "Content-Type: text/html; charset=utf-8\r\n"
-                 "Cache-Control: no-cache\r\n"
-                 "Accept-Ranges: none\r\n"
-                 "Connection: close\r\n"
-                 "\r\n", 
-                 SOFTWARE, VERSION);
         block_inited = 1;
     }
+    /* check size */
+    if (size > sizeof(block_buf))
+        return NULL;
     /* entity_t and body */
     rets = malloc(sizeof(struct entity_t));
     if (rets == NULL)
         return NULL;
+    /* header */
+    ret = snprintf(hbuf, sizeof(hbuf), 
+                   "HTTP/1.1 200 OK\r\n"
+                   "Server: %s/%s\r\n"
+                   "Content-Type: text/html; charset=utf-8\r\n"
+                   "Content-Length: %d\r\n"
+                   "Cache-Control: no-cache\r\n"
+                   "Accept-Ranges: none\r\n"
+                   "Connection: close\r\n"
+                   "\r\n", 
+                   SOFTWARE, VERSION, size);
     /* let all data as HTTP header */
-    rets->header = block_buf;
-    rets->header_length = size;
-    rets->header_dyn = 0;
-    rets->body = NULL;
-    rets->body_length = 0;
+    rets->header = strdup(hbuf);
+    if (rets->header == NULL) {
+        free(rets);
+        return NULL;
+    }
+    rets->header_length = ret;
+    rets->header_dyn = 1;
+    rets->body = block_buf;
+    rets->body_length = size;
     rets->body_dyn = 0;
 
     return rets;
