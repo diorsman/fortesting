@@ -39,6 +39,7 @@
 #include <sys/resource.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #define SOFTWARE        "TestHttpd"
@@ -48,8 +49,9 @@
 #define REQ_MAX         8192
 #define URL_MAX         4096
 #define BLOCK_MAX       0x100000    /* 1Mbytes */
+#define WAIT_BF_RESET   600         /* ms */
 
-#define CONNS_LIMIT_DEF 1000
+#define CONNS_LIMIT_DEF 10000
 #define ROOT_DIR_DEF    "/var/www/html"
 #define LISTEN_PORT     80
 #define WEBMON_PORT     8080
@@ -76,6 +78,11 @@ struct entity_t {
     char etag[ETAG_LEN + 1];
 };
 
+struct dlist_t {
+    struct dlist_t *prev;
+    struct dlist_t *next;
+};
+
 /* States for checked_state(from thttpd/2.25b). */
 #define CHST_FIRSTWORD  0
 #define CHST_FIRSTWS    1
@@ -95,6 +102,10 @@ struct entity_t {
 #define GR_BAD_REQUEST  2
 
 struct connection_t {
+    /* wait queue */
+    struct dlist_t list;
+    unsigned long long end_time; /* ms */
+    /* connecttion data */
     int fd;
     /* request */
     char req_buf[REQ_MAX];
@@ -121,6 +132,8 @@ static char *root_dir = ROOT_DIR_DEF;
 static int listen_port = LISTEN_PORT;
 static int webmon_port = WEBMON_PORT;
 static int enable_fake_page = 0;
+static int enable_reset = 0;
+static struct dlist_t wait_queue = {&wait_queue, &wait_queue};
 
 /* for statistics */
 static unsigned long long accepted = 0;
@@ -133,7 +146,8 @@ show_help(void)
            "                 [-d(%s): www root directory]\n"
            "                 [-p(%d): TestHttpd's listen port]\n"
            "                 [-p(%d): webmon's listen port]\n"
-           "                 [-b: enable fake page]\n",
+           "                 [-f: enable fake page]\n"
+           "                 [-r: enable reset]\n",
            conns_limit, root_dir, listen_port, webmon_port);
 }
 
@@ -369,6 +383,23 @@ set_noblock(int fd)
     return 0;
 }
 
+#if 0
+static int 
+set_nodelay(int fd)
+{
+    int on, ret;
+
+    /* no delay */
+    on = 1;
+    ret = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const void *)&on, 
+                     sizeof(on));
+    if (ret == -1) {
+        return -1;
+    }
+    return 0;
+}
+#endif
+
 static int
 listen_init(void)
 {
@@ -423,7 +454,7 @@ textinfo_cb(void *arg)
 
     /* running time */
     snprintf(str1, sizeof(str1),
-             "I have been running for %u seconds and accepted %llu connections.",
+             "I have been running for %u seconds and have accepted %llu connections.",
              (int)(time(NULL) - begin_time), accepted);
     return (const char **)rets;
 }
@@ -505,10 +536,25 @@ send_error(struct connection_t *c, int status)
     c->entity = rets;
 }
 
+static void 
+reset(int fd)
+{
+    /* Set lingering on a socket if needed */
+    struct linger l;
+
+    l.l_onoff = 1; 
+    l.l_linger = 0; 
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, (void *)&l, sizeof(l));
+}
+
 static void
 clear_connection(struct connection_t *c)
 {
+    /* reset connection? */
+    if (enable_reset)
+        reset(c->fd);
     close(c->fd);
+    /* free */
     if (c->entity_dyn) {
         if (c->entity->header_dyn)
             free(c->entity->header);
@@ -904,10 +950,13 @@ main(int argc, char *argv[])
     struct connection_t *conn;
     void *sd;
     pthread_t ptid;
+    struct timeval tv;
+    unsigned long long cur_time;
+    struct dlist_t *dl;
 
     /* parse arguments line */
     while (1) {
-        ret = getopt(argc, argv, "c:d:p:w:f");
+        ret = getopt(argc, argv, "c:d:p:w:fr");
         if (ret == -1) {
             if (argv[optind] != NULL) {
                 show_help();
@@ -918,9 +967,9 @@ main(int argc, char *argv[])
         switch (ret) {
         case 'c':
             conns_limit = atoi(optarg);
-            if (conns_limit < 1 || conns_limit > 10000) {
+            if (conns_limit < 1 || conns_limit > 60000) {
                 fprintf(stderr, 
-                        "The allowed max connection number should be in [1, 10000].\n");
+                        "The allowed max connection number should be in [1, 60000].\n");
                 exit(1);
             }
             break;
@@ -959,6 +1008,9 @@ main(int argc, char *argv[])
             break;
         case 'f':
             enable_fake_page = 1;
+            break;
+        case 'r':
+            enable_reset = 1;
             break;
         default:
             show_help();
@@ -1034,8 +1086,12 @@ main(int argc, char *argv[])
     }
     /* set textinfo callback */
     webmon_set_textinfo_callback(sd, textinfo_cb, NULL);
+    /* udpate uplimit for max connection */
+    my_graphs[1].high_limit = conns_limit;
     /* add graphs */
-    for (i = 0; i < sizeof(my_graphs) / sizeof(struct webmon_graph_t); i++) {
+    for (i = 0; i < sizeof(my_graphs) / sizeof(struct webmon_graph_t); 
+         i++) 
+    {
         if (webmon_addgraph(sd, &my_graphs[i]) == -1) {
             ERR("null");
             exit(1);
@@ -1050,9 +1106,10 @@ main(int argc, char *argv[])
     syslog(LOG_INFO, 
            "Now TestHttpd is listening on (0.0.0.0:%d).\n", 
            listen_port);
+
     /* main loop */
     while (1) {
-        nfd = epoll_wait(epollfd, outevtarr, max_fd, -1);
+        nfd = epoll_wait(epollfd, outevtarr, max_fd, WAIT_BF_RESET);
         if (nfd == -1) {
             if (errno == EINTR)
                 continue;
@@ -1091,6 +1148,16 @@ main(int argc, char *argv[])
                             close(conn_fd);
                             continue;
                         }
+#if 0
+                        /* no-delay */
+                        ret = set_nodelay(conn_fd);
+                        if (ret == -1) {
+                            ERR("null");
+                            /* ignore and next */
+                            close(conn_fd);
+                            continue;
+                        }
+#endif
                         /* new connection_t */
                         conn = malloc(sizeof(struct connection_t));
                         if (conn == NULL) {
@@ -1112,7 +1179,8 @@ main(int argc, char *argv[])
                         epollevt.events = EPOLLIN;
                         epollevt.data.u64 = ((unsigned long long)(unsigned int)conn << 32)
                                             | conn_fd;
-                        ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_fd, &epollevt);
+                        ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_fd, 
+                                        &epollevt);
                         if (ret == -1) {
                             ERR("null");
                             exit(1);
@@ -1138,7 +1206,8 @@ main(int argc, char *argv[])
                             memset(&epollevt, 0, sizeof(epollevt));
                             epollevt.events = EPOLLOUT;
                             epollevt.data.u64 = outevtarr[i].data.u64;
-                            ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, cur_fd, &epollevt);
+                            ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
+                                            cur_fd, &epollevt);
                             if (ret == -1) {
                                 ERR("null");
                                 exit(1);
@@ -1164,7 +1233,8 @@ main(int argc, char *argv[])
                             memset(&epollevt, 0, sizeof(epollevt));
                             epollevt.events = EPOLLOUT;
                             epollevt.data.u64 = outevtarr[i].data.u64;
-                            ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, cur_fd, &epollevt);
+                            ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
+                                            cur_fd, &epollevt);
                             if (ret == -1) {
                                 ERR("null");
                                 exit(1);
@@ -1185,7 +1255,8 @@ main(int argc, char *argv[])
                                 memset(&epollevt, 0, sizeof(epollevt));
                                 epollevt.events = EPOLLOUT;
                                 epollevt.data.u64 = outevtarr[i].data.u64;
-                                ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, cur_fd, &epollevt);
+                                ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
+                                                cur_fd, &epollevt);
                                 if (ret == -1) {
                                     ERR("null");
                                     exit(1);
@@ -1198,7 +1269,8 @@ main(int argc, char *argv[])
                             memset(&epollevt, 0, sizeof(epollevt));
                             epollevt.events = EPOLLOUT;
                             epollevt.data.u64 = outevtarr[i].data.u64;
-                            ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, cur_fd, &epollevt);
+                            ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
+                                            cur_fd, &epollevt);
                             if (ret == -1) {
                                 ERR("null");
                                 exit(1);
@@ -1239,15 +1311,56 @@ main(int argc, char *argv[])
                         }
                     }
                     /* all sent */
-                    //shutdown(conn->fd, SHUT_WR);
-failed:
-                    clear_connection(conn);
+                    if (enable_reset) {
+                        /* delete */
+                        /* epollevt for kernel-2.6.9, see epoll bugs */
+                        memset(&epollevt, 0, sizeof(epollevt));
+                        ret = epoll_ctl(epollfd, EPOLL_CTL_DEL, 
+                                        cur_fd, &epollevt);
+                        if (ret == -1) {
+                            ERR("null");
+                            exit(1);
+                        }
+                        /* append to wait_queue */
+                        gettimeofday(&tv, NULL);
+                        conn->end_time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+                        wait_queue.prev->next = (struct dlist_t *)conn;
+                        conn->list.prev = wait_queue.prev;
+                        wait_queue.prev = (struct dlist_t *)conn;
+                        conn->list.next = &wait_queue;
+                    } else {
+                        /* close immediately */
+                        clear_connection(conn);
+                    }
 for_next:
                     continue;
+failed:
+                    clear_connection(conn);
                 } else {
                     /* error, clear connection */
                     ERR("null");
                     clear_connection(conn);
+                }
+            }
+        }
+
+        if (enable_reset) {
+            /* for wait_queue */
+            gettimeofday(&tv, NULL);
+            cur_time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+            /* for each entry */
+            while ((dl = wait_queue.next) != &wait_queue) {
+                /* expire? */
+                if (cur_time - ((struct connection_t *)dl)->end_time
+                    >= WAIT_BF_RESET)
+                {
+                    /* detach from wait_queue */
+                    dl->prev->next = dl->next;
+                    dl->next->prev = dl->prev;
+                    /* do really close */
+                    clear_connection((struct connection_t *)dl);
+                } else {
+                    break;
                 }
             }
         }
