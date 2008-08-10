@@ -2,7 +2,9 @@
 2, make /local/block as an option; ...done!
 3, deamonrize; ...done!
 4, logging by syslog; ...done!
-5, add tcp reset as an option for connection close;
+5, add tcp reset as an option for connection close; ...done!
 6, parse request header/source address;
 
 7, add simple cache support: ETag.
+
+question: how much does malloc/free cost?
