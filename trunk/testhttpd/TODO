@@ -8,3 +8,4 @@
 7, add simple cache support: ETag.
 
 question: how much does malloc/free cost?
+          what type of content?
