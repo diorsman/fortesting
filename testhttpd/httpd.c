@@ -50,6 +50,7 @@
 #define URL_MAX         4096
 #define BLOCK_MAX       0x100000    /* 1Mbytes */
 #define WAIT_BF_RESET   600         /* ms */
+#define URL_DEF         "index.html"
 
 #define CONNS_LIMIT_DEF 10000
 #define ROOT_DIR_DEF    "/var/www/html"
@@ -101,20 +102,34 @@ struct dlist_t {
 #define GR_GOT_REQUEST  1
 #define GR_BAD_REQUEST  2
 
+/* request entity header */
+#define HDR_REFERER     0
+#define HDR_USER_AGENT  1
+#define HDR_NUM         2
+
+struct http_hdr_t {
+    const char *hdr;
+    int hdr_len;
+};  
+
 struct connection_t {
     /* wait queue */
     struct dlist_t list;
     unsigned long long end_time; /* ms */
     /* connecttion data */
     int fd;
+    struct sockaddr_in from;
     /* request */
     char req_buf[REQ_MAX];
     size_t req_read;
     size_t req_checked;
     int checked_state;
+    /* http request compnoents */
 #define METHOD_HEAD     0
 #define METHOD_GET      1
     int method;
+    char *orig_filename;
+    char *req_hdrs[HDR_NUM];
     /* response */
     struct entity_t *entity;
     int entity_dyn;
@@ -134,6 +149,10 @@ static int webmon_port = WEBMON_PORT;
 static int enable_fake_page = 0;
 static int enable_reset = 0;
 static struct dlist_t wait_queue = {&wait_queue, &wait_queue};
+static struct http_hdr_t http_req_hdrs[HDR_NUM] = {
+    {"Referer",     7}, 
+    {"User-Agent",  10},
+};
 
 /* for statistics */
 static unsigned long long accepted = 0;
@@ -145,7 +164,7 @@ show_help(void)
     printf("usage: testhttpd [-c(%d): allowed max connections]\n"
            "                 [-d(%s): www root directory]\n"
            "                 [-p(%d): TestHttpd's listen port]\n"
-           "                 [-p(%d): webmon's listen port]\n"
+           "                 [-w(%d): webmon's listen port]\n"
            "                 [-f: enable fake page]\n"
            "                 [-r: enable reset]\n",
            conns_limit, root_dir, listen_port, webmon_port);
@@ -847,7 +866,10 @@ entity_get(const char *path)
 {
     struct entity_t s, *rets;
     
-    s.u.name = (char*)path;
+    if (*path == '\0')
+        s.u.name = URL_DEF;
+    else
+        s.u.name = (char*)path;
     rets = (struct entity_t*)bsearch(&s, entity_arr, entity_count, 
                                      sizeof(struct entity_t), entity_cmp);
     return rets;
@@ -856,8 +878,8 @@ entity_get(const char *path)
 static int 
 parse_request(struct connection_t *c)
 {
-    char *p, *q, *rest, url[URL_MAX];
-    int size;
+    char *p, *q, *r, *s;
+    int size, i;
 
     p = c->req_buf;
     /* get http method */
@@ -891,7 +913,7 @@ parse_request(struct connection_t *c)
         return -1;
     }
     *q = '\0';
-    rest = q + 1;
+    r = q + 1;
     /* check url length */
     if (q - p >= URL_MAX) {
         /* Request-URI Too Long */
@@ -911,23 +933,68 @@ parse_request(struct connection_t *c)
     /* url decode */
     url_decode(p, p);
     /* remove leading '/' */
-    strcpy(url, p + 1);
-    if (url[0] == '\0')
-        strcpy(url, "index.html");
+    c->orig_filename = p + 1;
     /* for security */
-    de_dotdot(url);
-    if (url[0] == '/'
-        || (url[0] == '.' && url[1] == '.' 
-            && (url[2] == '\0' || url[2] == '/')))
+    de_dotdot(c->orig_filename);
+    if (c->orig_filename[0] == '/'
+        || (c->orig_filename[0] == '.' && c->orig_filename[1] == '.' 
+            && (c->orig_filename[2] == '\0' || c->orig_filename[2] == '/')))
     {
         /* Bad Request */
         send_error(c, 400);
         return -1;
     }
+
+    /* for request headers */
+    p = strchr(r, '\n');
+    if (p == NULL) {
+        /* Bad Request */
+        send_error(c, 400);
+        return -1;
+    }
+    p++;
+    /* p: new line */
+    while (1) {
+        p += strspn(p, " \t");
+        /* get line */
+        r = strchr(p, '\n');
+        if (r == NULL) {
+            /* Bad Request */
+            send_error(c, 400);
+            return -1;
+        } else if (p + strspn(p, "\r") == r) {
+            /* request end */
+            break;
+        }
+        *r = '\0';
+        /* for line */
+        q = strchr(p, ':');
+        if (q != NULL) {
+            *q++ = '\0';
+            /* have ':', parse it */
+            for (i = 0; i < HDR_NUM; i++) {
+                if (strncasecmp(http_req_hdrs[i].hdr, p, 
+                                http_req_hdrs[i].hdr_len) == 0) 
+                {
+                    /* match */
+                    q += strspn(q, " \t");
+                    /* discard '\r' if exist */
+                    s = strchr(q, '\r');
+                    if (s != NULL)
+                        *s = '\0';
+                    c->req_hdrs[i] = q;
+                    break;
+                }
+            }
+        }
+        /* for next */
+        p = r + 1;
+    }
+
     /* request memory block or stat page? */
     if (enable_fake_page) {
-        if (strncmp(url, "local/block/", 12) == 0) {
-            size = atoi(url + 12);
+        if (strncmp(c->orig_filename, "local/block/", 12) == 0) {
+            size = atoi(c->orig_filename + 12);
             if (size <= 0 || size > BLOCK_MAX) {
                 send_error(c, 400);
                 return -1;
@@ -944,7 +1011,7 @@ parse_request(struct connection_t *c)
         }
     }
     /* normal file */
-    c->entity = entity_get(url);
+    c->entity = entity_get(c->orig_filename);
     if (c->entity == NULL) {
         /* Not Found */
         send_error(c, 404);
@@ -966,6 +1033,8 @@ main(int argc, char *argv[])
     struct timeval tv;
     unsigned long long cur_time;
     struct dlist_t *dl;
+    struct sockaddr_in from;
+    socklen_t from_len;
 
     /* parse arguments line */
     while (1) {
@@ -1143,7 +1212,10 @@ main(int argc, char *argv[])
                             break;
                         }
                         /* accept */
-                        conn_fd = accept(listenfd, NULL, NULL);
+                        from_len = sizeof(from);
+                        conn_fd = accept(listenfd, 
+                                         (struct sockaddr *)&from, 
+                                         &from_len);
                         if (conn_fd == -1) {
                             /* accept error, ignore request */
                             if (errno != EAGAIN)
@@ -1172,7 +1244,7 @@ main(int argc, char *argv[])
                         }
 #endif
                         /* new connection_t */
-                        conn = malloc(sizeof(struct connection_t));
+                        conn = calloc(1, sizeof(struct connection_t));
                         if (conn == NULL) {
                             ERR("null");
                             /* ignore and next */
@@ -1180,13 +1252,8 @@ main(int argc, char *argv[])
                             continue;
                         }
                         conn->fd = conn_fd;
-                        conn->req_read = 0;
-                        conn->req_checked = 0;
+                        memcpy(&conn->from, &from, sizeof(from));
                         conn->checked_state = CHST_FIRSTWORD;
-                        conn->entity = NULL;
-                        conn->entity_dyn = 0;
-                        conn->header_sent = 0;
-                        conn->body_sent = 0;
                         /* add conn_fd to epoll array */
                         memset(&epollevt, 0, sizeof(epollevt));
                         epollevt.events = EPOLLIN;
@@ -1322,6 +1389,17 @@ main(int argc, char *argv[])
                             /* send some data */
                             conn->body_sent += ret;
                         }
+                    }
+                    /* log */
+                    if (conn->orig_filename != NULL) {
+                        syslog(LOG_INFO, 
+                               "%s /%s %d [from: %s] [user_agent: %s], [referer: %s].\n", 
+                               (conn->method == METHOD_GET) ? "GET" : "HEAD",
+                               conn->orig_filename,
+                               ((unsigned int)conn->entity->u.status < 1000) ? conn->entity->u.status : 200, 
+                               inet_ntoa(conn->from.sin_addr),
+                               (conn->req_hdrs[HDR_USER_AGENT] != NULL) ? conn->req_hdrs[HDR_USER_AGENT] : "Unknown", 
+                               (conn->req_hdrs[HDR_REFERER] != NULL) ? conn->req_hdrs[HDR_REFERER] : "Unknown");
                     }
                     /* all sent */
                     if (enable_reset) {

@@ -3,7 +3,7 @@
 3, deamonrize; ...done!
 4, logging by syslog; ...done!
 5, add tcp reset as an option for connection close; ...done!
-6, parse request header/source address;
+6, parse request header/source address; ...done!
 
 7, add simple cache support: ETag.
 
