@@ -1,0 +1,3 @@
+1, If the request url is "/", it will be redirected to "/index.html".
+2, Fake page is only for test use, dont enable it.
+3, httpc is a benchmarking tool for testhttpd.
