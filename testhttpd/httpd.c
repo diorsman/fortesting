@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
@@ -44,7 +45,6 @@
 
 #define SOFTWARE        "TestHttpd"
 #define VERSION         "0.1.1"
-#define ETAG_LEN        32
 #define LISTEN_BACKLOG  1024
 #define REQ_MAX         8192
 #define URL_MAX         4096
@@ -60,9 +60,11 @@
 #define ERR(string) \
         do { \
             syslog(LOG_ERR, \
-                   "Unexpected error occurred(%s:%d), errno = %d.\n", \
-                   __FILE__, __LINE__, errno); \
-        } while (0)
+                    "Unexpected error occurred(%s:%d), errno = %d.\n" \
+                    "  AUX-Message: %s.\n", \
+                    __FILE__, __LINE__, errno, string); \
+            errno = 0; \
+        } while (0);
 
 struct entity_t {
     union {
@@ -75,8 +77,6 @@ struct entity_t {
     char *body;
     int body_dyn;
     size_t body_length;
-    /* for optional cache module */
-    char etag[ETAG_LEN + 1];
 };
 
 struct dlist_t {
@@ -135,6 +135,8 @@ struct connection_t {
     int entity_dyn;
     size_t header_sent;
     size_t body_sent;
+    /* for optmize */
+    int req_hdrs_got;
 };
 
 static struct entity_t *entity_arr = NULL;
@@ -148,6 +150,7 @@ static int listen_port = LISTEN_PORT;
 static int webmon_port = WEBMON_PORT;
 static int enable_fake_page = 0;
 static int enable_reset = 0;
+static int enable_request_logging = 0;
 static struct dlist_t wait_queue = {&wait_queue, &wait_queue};
 static struct http_hdr_t http_req_hdrs[HDR_NUM] = {
     {"Referer",     7}, 
@@ -158,15 +161,78 @@ static struct http_hdr_t http_req_hdrs[HDR_NUM] = {
 static unsigned long long accepted = 0;
 static int cur_conns = 0;
 
+/* connection_t list management */
+struct mem_node_t {
+    void *next;
+    struct connection_t c;
+};
+static struct mem_node_t *clist = NULL;
+
+static int
+init_conn_man(int max)
+{
+    struct mem_node_t *mn;
+
+    /* alloc */
+    clist = malloc(max * sizeof(struct mem_node_t));
+    if (clist == NULL)
+        return -1;
+    /* make list */
+    mn = clist;
+    while (--max > 0) {
+        mn->next = mn + 1;
+        mn++;
+    }
+    mn->next = NULL;
+    return 0;
+}
+
+static struct connection_t *
+new_conn(void)
+{
+    struct mem_node_t *mn;
+
+    if (clist == NULL) {
+        ERR("null");
+        exit(1);
+    }
+    /* detach from list */
+    mn = clist;
+    clist = clist->next;
+    return &(mn->c);
+}
+
+/**
+ * container_of - cast a member of a structure out to the containing structure
+ * @ptr:    the pointer to the member.
+ * @type:   the type of the container struct this is embedded in.
+ * @member: the name of the member within the struct.
+ *
+ */
+#define container_of(ptr, type, member) ({          \
+    const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
+    (type *)( (char *)__mptr - offsetof(type,member) );})
+
+static void
+free_conn(struct connection_t *conn)
+{
+    struct mem_node_t *mn;
+
+    mn = container_of(conn, struct mem_node_t, c);
+    mn->next = clist;
+    clist = mn;
+}
+
 static void 
 show_help(void)
 {
     printf("usage: testhttpd [-c(%d): allowed max connections]\n"
            "                 [-d(%s): www root directory]\n"
            "                 [-p(%d): TestHttpd's listen port]\n"
-           "                 [-w(%d): webmon's listen port]\n"
+           "                 [-w(%d): WebMonitor's listen port]\n"
            "                 [-f: enable fake page]\n"
-           "                 [-r: enable reset]\n",
+           "                 [-r: enable reset]\n"
+           "                 [-l: enable request logging]\n",
            conns_limit, root_dir, listen_port, webmon_port);
 }
 
@@ -502,7 +568,10 @@ accepted_sample(void *arg, double *ret)
         gettimeofday(&tv, NULL);
         interval = (tv.tv_sec - last_sample_time.tv_sec) * 1000
                    + (tv.tv_usec - last_sample_time.tv_usec) / 1000;
-        *ret = ((double)(accepted - last_count) * 1000) / interval;
+        if (interval <= 0)
+            *ret = 0.0;
+        else
+            *ret = ((double)(accepted - last_count) * 1000) / interval;
         /* for next sample */
         last_count = accepted;
         last_sample_time = tv;
@@ -520,13 +589,13 @@ conns_sample(void *arg, double *ret)
 
 struct webmon_graph_t my_graphs[] = {
     /* for accepted */
-    {"每秒接受新连接速率", 1, 10000, 0,
+    {"每秒接受新连接", 1, 10000, 0,
      {"n/second"},
      {accepted_sample},
      {NULL},
     },
     /* for cur_conns */
-    {"并发连接数", 1, 1000, 0,
+    {"并发连接数", 1, 10000, 0,
      {"n"},
      {conns_sample},
      {NULL},
@@ -582,7 +651,8 @@ clear_connection(struct connection_t *c)
             free(c->entity->body);
         free(c->entity);
     }
-    free(c);
+    //free(c);
+    free_conn(c);
     cur_conns--;
 }
 
@@ -982,7 +1052,12 @@ parse_request(struct connection_t *c)
                     s = strchr(q, '\r');
                     if (s != NULL)
                         *s = '\0';
+                    if (c->req_hdrs[i] == NULL)
+                        c->req_hdrs_got++;
                     c->req_hdrs[i] = q;
+                    /* get all? */
+                    if (c->req_hdrs_got == HDR_NUM)
+                        goto got_all_hdrs;
                     break;
                 }
             }
@@ -991,6 +1066,7 @@ parse_request(struct connection_t *c)
         p = r + 1;
     }
 
+got_all_hdrs:
     /* request memory block or stat page? */
     if (enable_fake_page) {
         if (strncmp(c->orig_filename, "local/block/", 12) == 0) {
@@ -1038,7 +1114,7 @@ main(int argc, char *argv[])
 
     /* parse arguments line */
     while (1) {
-        ret = getopt(argc, argv, "c:d:p:w:fr");
+        ret = getopt(argc, argv, "c:d:p:w:frl");
         if (ret == -1) {
             if (argv[optind] != NULL) {
                 show_help();
@@ -1094,6 +1170,9 @@ main(int argc, char *argv[])
         case 'r':
             enable_reset = 1;
             break;
+        case 'l':
+            enable_request_logging = 1;
+            break;
         default:
             show_help();
             exit(1);
@@ -1147,10 +1226,15 @@ main(int argc, char *argv[])
     }
     /* add listenfd to epoll array */
     memset(&epollevt, 0, sizeof(epollevt));
-    epollevt.events = EPOLLIN;
+    epollevt.events = EPOLLIN | EPOLLET;
     epollevt.data.fd = listenfd;
     ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, listenfd, &epollevt);
     if (ret == -1) {
+        ERR("null");
+        exit(1);
+    }
+    /* conn list init */
+    if (init_conn_man(conns_limit) == -1) {
         ERR("null");
         exit(1);
     }
@@ -1193,12 +1277,15 @@ main(int argc, char *argv[])
     while (1) {
         nfd = epoll_wait(epollfd, outevtarr, max_fd, WAIT_BF_RESET);
         if (nfd == -1) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                errno = 0;
                 continue;
+            }
             /* other error */
             ERR("null");
             exit(1);
         }
+
         /* have some events */
         for (i = 0; i < nfd; i++) {
             cur_fd = outevtarr[i].data.fd;
@@ -1218,8 +1305,10 @@ main(int argc, char *argv[])
                                          &from_len);
                         if (conn_fd == -1) {
                             /* accept error, ignore request */
-                            if (errno != EAGAIN)
+                            if (errno != EAGAIN) {
                                 ERR("null");
+                                errno = 0;
+                            }
                             /* dont call accept again */
                             break;
                         }
@@ -1244,19 +1333,33 @@ main(int argc, char *argv[])
                         }
 #endif
                         /* new connection_t */
-                        conn = calloc(1, sizeof(struct connection_t));
+                        //conn = calloc(1, sizeof(struct connection_t));
+                        //conn = malloc(sizeof(struct connection_t));
+                        conn = new_conn();
+#if 0
                         if (conn == NULL) {
                             ERR("null");
                             /* ignore and next */
                             close(conn_fd);
                             continue;
                         }
+#endif
+                        /* init */
                         conn->fd = conn_fd;
                         memcpy(&conn->from, &from, sizeof(from));
+                        conn->req_read = 0;
+                        conn->req_checked = 0;
                         conn->checked_state = CHST_FIRSTWORD;
+                        conn->orig_filename = NULL;
+                        memset(conn->req_hdrs, 0, sizeof(conn->req_hdrs));
+                        conn->entity = NULL;
+                        conn->entity_dyn = 0;
+                        conn->header_sent = 0;
+                        conn->body_sent = 0;
+                        conn->req_hdrs_got = 0;
                         /* add conn_fd to epoll array */
                         memset(&epollevt, 0, sizeof(epollevt));
-                        epollevt.events = EPOLLIN;
+                        epollevt.events = EPOLLIN | EPOLLET;
                         epollevt.data.u64 = ((unsigned long long)(unsigned int)conn << 32)
                                             | conn_fd;
                         ret = epoll_ctl(epollfd, EPOLL_CTL_ADD, conn_fd, 
@@ -1284,7 +1387,7 @@ main(int argc, char *argv[])
                             send_error(conn, 413);
                             /* change to write mode */
                             memset(&epollevt, 0, sizeof(epollevt));
-                            epollevt.events = EPOLLOUT;
+                            epollevt.events = EPOLLOUT | EPOLLET;
                             epollevt.data.u64 = outevtarr[i].data.u64;
                             ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
                                             cur_fd, &epollevt);
@@ -1299,6 +1402,7 @@ main(int argc, char *argv[])
                                    sizeof(conn->req_buf) - 1 - conn->req_read);
                         if (ret == -1) {
                             if (errno == EAGAIN) {
+                                errno = 0;
                                 break;
                             } else {
                                 /* error, clear connection */
@@ -1311,7 +1415,7 @@ main(int argc, char *argv[])
                             send_error(conn, 400);
                             /* change to write mode */
                             memset(&epollevt, 0, sizeof(epollevt));
-                            epollevt.events = EPOLLOUT;
+                            epollevt.events = EPOLLOUT | EPOLLET;
                             epollevt.data.u64 = outevtarr[i].data.u64;
                             ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
                                             cur_fd, &epollevt);
@@ -1333,7 +1437,7 @@ main(int argc, char *argv[])
                                 send_error(conn, 400);
                                 /* change to write mode */
                                 memset(&epollevt, 0, sizeof(epollevt));
-                                epollevt.events = EPOLLOUT;
+                                epollevt.events = EPOLLOUT | EPOLLET;
                                 epollevt.data.u64 = outevtarr[i].data.u64;
                                 ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
                                                 cur_fd, &epollevt);
@@ -1347,7 +1451,7 @@ main(int argc, char *argv[])
                             parse_request(conn);
                             /* change to write mode */
                             memset(&epollevt, 0, sizeof(epollevt));
-                            epollevt.events = EPOLLOUT;
+                            epollevt.events = EPOLLOUT | EPOLLET;
                             epollevt.data.u64 = outevtarr[i].data.u64;
                             ret = epoll_ctl(epollfd, EPOLL_CTL_MOD, 
                                             cur_fd, &epollevt);
@@ -1365,8 +1469,10 @@ main(int argc, char *argv[])
                         ret = write(cur_fd, conn->entity->header + conn->header_sent, 
                                     conn->entity->header_length - conn->header_sent);
                         if (ret < 0) {
-                            if (errno == EAGAIN)
+                            if (errno == EAGAIN) {
+                                errno = 0;
                                 goto for_next;
+                            }
                             /* error */
                             ERR("null");
                             goto failed;
@@ -1380,8 +1486,10 @@ main(int argc, char *argv[])
                             ret = write(cur_fd, conn->entity->body + conn->body_sent, 
                                         conn->entity->body_length - conn->body_sent);
                             if (ret < 0) {
-                                if (errno == EAGAIN)
+                                if (errno == EAGAIN) {
+                                    errno = 0;
                                     goto for_next;
+                                }
                                 /* error */
                                 ERR("null");
                                 goto failed;
@@ -1391,7 +1499,7 @@ main(int argc, char *argv[])
                         }
                     }
                     /* log */
-                    if (conn->orig_filename != NULL) {
+                    if (enable_request_logging && conn->orig_filename != NULL) {
                         syslog(LOG_INFO, 
                                "%s /%s %d [from: %s] [user_agent: %s], [referer: %s].\n", 
                                (conn->method == METHOD_GET) ? "GET" : "HEAD",

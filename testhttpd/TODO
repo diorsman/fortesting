@@ -4,8 +4,10 @@
 4, logging by syslog; ...done!
 5, add tcp reset as an option for connection close; ...done!
 6, parse request header/source address; ...done!
-
-7, add simple cache support: ETag.
+7, optimize: ...done!
+    1, for http request header.
+    2, EPOLL LE->EG.
+    3, connection_t cache.
 
 question: how much does malloc/free cost?
           what type of content?

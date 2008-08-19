@@ -34,8 +34,8 @@
 
 #define ENABLE_RESET
 
-#define MAXSOCK     10000
-#define SERVADDR    "192.168.6.78"
+#define MAXSOCK     3500
+#define SERVADDR    "192.168.6.48"
 #define SERVPORT    80
 #define RESP_MAX    4000
 #define ERR(string) \
@@ -198,7 +198,7 @@ main(int argc, char *argv[])
     struct sockaddr_in servaddr;
     struct epoll_event epollevt, outevtarr[MAXSOCK];
     struct connection_t *conn;
-    const char *req = "GET /1k HTTP/1.1\r\n"
+    const char *req = "GET /index.html HTTP/1.1\r\n"
                       "Host: TestHttpd\r\n"
                       "User-Agent: TestHttpd/httpc\r\n"
                       "\r\n";
