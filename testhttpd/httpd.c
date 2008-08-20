@@ -236,6 +236,13 @@ show_help(void)
            conns_limit, root_dir, listen_port, webmon_port);
 }
 
+static void
+sig_handler(int signo)
+{
+    if (signo == SIGINT)
+        exit(0);
+}
+
 #define ERROR_ALLOC_STEP    16
 static void
 error_install(int status, const char *text)
@@ -1107,7 +1114,7 @@ main(int argc, char *argv[])
     void *sd;
     pthread_t ptid;
     struct timeval tv;
-    unsigned long long cur_time;
+    unsigned long long now;
     struct dlist_t *dl;
     struct sockaddr_in from;
     socklen_t from_len;
@@ -1206,6 +1213,7 @@ main(int argc, char *argv[])
 
     /* signal */
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, sig_handler);
     /* initialize error cache */
     error_init();
     /* initialize entity cache */
@@ -1285,6 +1293,10 @@ main(int argc, char *argv[])
             ERR("null");
             exit(1);
         }
+
+        /* get current time */
+        gettimeofday(&tv, NULL);
+        now = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 
         /* have some events */
         for (i = 0; i < nfd; i++) {
@@ -1521,8 +1533,7 @@ main(int argc, char *argv[])
                             exit(1);
                         }
                         /* append to wait_queue */
-                        gettimeofday(&tv, NULL);
-                        conn->end_time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+                        conn->end_time = now;
                         wait_queue.prev->next = (struct dlist_t *)conn;
                         conn->list.prev = wait_queue.prev;
                         wait_queue.prev = (struct dlist_t *)conn;
@@ -1545,12 +1556,10 @@ failed:
 
         if (enable_reset) {
             /* for wait_queue */
-            gettimeofday(&tv, NULL);
-            cur_time = tv.tv_sec * 1000 + tv.tv_usec / 1000;
             /* for each entry */
             while ((dl = wait_queue.next) != &wait_queue) {
                 /* expire? */
-                if (cur_time - ((struct connection_t *)dl)->end_time
+                if (now - ((struct connection_t *)dl)->end_time
                     >= WAIT_BF_RESET)
                 {
                     /* detach from wait_queue */
