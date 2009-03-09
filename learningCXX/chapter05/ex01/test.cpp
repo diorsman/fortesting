@@ -9,11 +9,14 @@ main()
     char *cp = &c;
 
     int ia[10] = {0, 1, 2};
-    int * const & ir = ia;
+    //int *const iap = ia;
+    int * const & iar = ia;
     
     // {...} can be used to initialize an array, but it's not an array.
-    char *sa[] = {"string1", "string2", "string3"};
-    char **sap = sa;
+    const char *sa[] = {"string1", "string2", "string3"};
+    const char **const sap = sa;
+    //*sap = "hello";   // right
+    //**sap = '\0';     // wrong
 
     char **sap2 = &cp;
 
