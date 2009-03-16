@@ -86,11 +86,11 @@ my_atoi(const char *s)
 int
 main(int argc, char *argv[])
 {
-    char *d10 = "123";
+    const char *d10 = "123";
     cout << "my_atoi(" << d10 << ") = " << my_atoi(d10) << "(" << 123 << ")" << endl;
-    char *d16 = "0x123";
+    const char *d16 = "0x123";
     cout << "my_atoi(" << d16 << ") = " << my_atoi(d16) << "(" << 0x123 << ")" << endl;
-    char *d8 = "0123";
+    const char *d8 = "0123";
     cout << "my_atoi(" << d8 << ") = " << my_atoi(d8) << "(" << 0123 << ")" << endl;
 
     return 0;
