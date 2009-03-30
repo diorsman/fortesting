@@ -102,6 +102,10 @@ prim(bool get)
         if (get_token() == ASSIGN)
             v = expr(true);
         return v;
+        //get_token();
+        //if (curr_tok == ASSIGN) {
+        //} else if (curr_tok == LP) {
+        //}
     }
     case MINUS:
         return -prim(true);
@@ -178,7 +182,7 @@ func_decl(bool get)
         body.push_back(ch);
     } while (ch != '}');
     // discards '}'
-    
+    body.erase(body.length() - 1);
     // got function
     func_table[name] = body;
     return 0;
