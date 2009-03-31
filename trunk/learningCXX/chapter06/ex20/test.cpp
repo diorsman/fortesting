@@ -47,7 +47,6 @@ get_token()
     case '(':
     case ')':
     case '{':
-    case '}':
         return curr_tok = Token_value(ch);
     case '\n':
         curr_lineno++;
@@ -81,6 +80,7 @@ get_token()
 }
 
 map<string, double> table;
+map<string, string> func_table;
 
 double expr(bool get);
 
@@ -98,14 +98,26 @@ prim(bool get)
     }
     case NAME:
     {
-        double &v = table[string_value];
-        if (get_token() == ASSIGN)
+        string name = string_value;
+        get_token();
+        if (curr_tok == ASSIGN) {
+            // assign
+            double &v = table[name];
             v = expr(true);
-        return v;
-        //get_token();
-        //if (curr_tok == ASSIGN) {
-        //} else if (curr_tok == LP) {
-        //}
+            return v;
+        } else if (curr_tok == LP) {
+            // function call
+            get_token();
+            if (curr_tok != RP)
+                return error(") expected");
+            // insert function body into cin
+            string body = func_table[name];
+            for (string::const_iterator cit = body.end() - 1; cit >= body.begin(); cit--)
+                cin.putback(*cit);
+            return expr(true);
+        } else {
+            return table[name];
+        }
     }
     case MINUS:
         return -prim(true);
@@ -157,8 +169,6 @@ expr(bool get)
         }
     }
 }
-
-map<string, string> func_table;
 
 int
 func_decl(bool get)
