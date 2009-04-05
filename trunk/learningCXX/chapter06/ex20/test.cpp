@@ -30,7 +30,6 @@ Token_value
 get_token()
 {
     char ch = 0;
-    //cin >> ch;
     do {
         if (!cin.get(ch)) return curr_tok = END;
     } while (ch != '\n' && isspace(ch));
@@ -170,6 +169,9 @@ expr(bool get)
     }
 }
 
+/////////////////////////////////////
+//  for example:
+//      DEF sq() { a * a }
 int
 func_decl(bool get)
 {
@@ -179,7 +181,15 @@ func_decl(bool get)
     if (curr_tok != NAME)
         return error("function name expected");
     string name = string_value;
-    // wait left brace 
+    // wait left bracket
+    get_token();
+    if (curr_tok != LP)
+        return error("( expected");
+    // wait right bracket
+    get_token();
+    if (curr_tok != RP)
+        return error(") expected");
+    // wait left brace
     get_token();
     if (curr_tok != LB)
         return error("{ expected");
@@ -187,7 +197,7 @@ func_decl(bool get)
     string body = "";
     char ch = 0;
     do {
-        if (!cin.get(ch)) 
+        if (!cin.get(ch))
             return error("invalid function's declaration");
         body.push_back(ch);
     } while (ch != '}');
